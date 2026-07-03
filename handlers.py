@@ -60,10 +60,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Выберите тариф:"
         )
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_plans())
-
-    elif data == "plan_1":
-    plan_name = "1 месяц"
-    price = Config.PRICE_1_MONTH
+        elif data in ["plan_1", "plan_3", "plan_12"]:
+    plans = {
+        "plan_1": ("1 месяц", Config.PRICE_1_MONTH),
+        "plan_3": ("3 месяца", Config.PRICE_3_MONTHS),
+        "plan_12": ("12 месяцев", Config.PRICE_12_MONTHS),
+    }
+    plan_name, price = plans[data]
         context.user_data['selected_plan'] = {"name": plan_name, "price": price, "code": data}
         text = (
             f"✅ Вы выбрали тариф: <b>{plan_name}</b>\n"
