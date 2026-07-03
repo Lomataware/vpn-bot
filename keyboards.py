@@ -32,7 +32,5 @@ def get_payment_methods():
 def get_plans():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"1 месяц — {Config.PRICE_1_MONTH}₽", callback_data="plan_1")],
-        [InlineKeyboardButton(f"3 месяца — {Config.PRICE_3_MONTHS}₽", callback_data="plan_3")],
-        [InlineKeyboardButton(f"12 месяцев — {Config.PRICE_12_MONTHS}₽", callback_data="plan_12")],
         [InlineKeyboardButton("◀️ Назад", callback_data="buy_subscription")]
     ])
