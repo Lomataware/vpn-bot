@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await save_user(update.effective_user)
+    save_user(update.effective_user)
     user = update.effective_user
     text = (
         f"👋 Привет, {user.first_name}!\n\n"
@@ -170,7 +170,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await save_user(update.effective_user)
+    save_user(update.effective_user)
     text = update.message.text.lower()
     if "привет" in text or "hi" in text:
         await update.message.reply_text("Привет! 👋 Используйте меню:", reply_markup=get_main_menu())
