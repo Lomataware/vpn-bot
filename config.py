@@ -26,5 +26,3 @@ class Config:
 
     # Prices
     PRICE_1_MONTH = int(os.getenv('PRICE_1_MONTH', '100'))
-    PRICE_3_MONTHS = int(os.getenv('PRICE_3_MONTHS', '250'))
-    PRICE_12_MONTHS = int(os.getenv('PRICE_12_MONTHS', '800'))
