@@ -5,13 +5,14 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from config import Config
-from database import save_user, get_user_info, get_users_count
+from database import save_user, get_user_info, get_users_count, get_db_connection
 from keyboards import get_main_menu, get_back_button, get_payment_methods, get_plans
 
 logger = logging.getLogger(__name__)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
     save_user(update.effective_user)
     user = update.effective_user
     text = (
@@ -23,14 +24,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик нажатий на inline-кнопки"""
     query = update.callback_query
     await query.answer()
     data = query.data
     user = update.effective_user
 
+    # ===== ГЛАВНОЕ МЕНЮ =====
     if data == "main_menu":
-        await query.edit_message_text("Главное меню:", reply_markup=get_main_menu())
+        await query.edit_message_text(
+            "Главное меню:",
+            reply_markup=get_main_menu()
+        )
 
+    # ===== MTProto ПРОКСИ =====
     elif data == "mtproto":
         text = (
             "🔌 <b>MTProto прокси для Telegram</b>\n\n"
@@ -50,8 +57,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💡 <b>Совет:</b> для лучшего обхода блокировок используйте прокси вместе с "
             "программами Byedpi, ByeByeDPI или Zapret."
         )
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button())
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_back_button()
+        )
 
+    # ===== ПОКУПКА ПОДПИСКИ =====
     elif data == "buy_subscription":
         text = (
             "💳 <b>Покупка подписки</b>\n\n"
@@ -59,19 +71,33 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "смартфона, компьютера, планшета. Работает с любыми приложениями и сайтами.\n\n"
             "Выберите тариф:"
         )
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_plans())
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_plans()
+        )
 
+    # ===== ВЫБОР ТАРИФА (только 1 месяц) =====
     elif data == "plan_1":
-    plan_name = "1 месяц"
-    price = Config.PRICE_1_MONTH
-    context.user_data['selected_plan'] = {"name": plan_name, "price": price, "code": data}
+        plan_name = "1 месяц"
+        price = Config.PRICE_1_MONTH
+        context.user_data['selected_plan'] = {
+            "name": plan_name,
+            "price": price,
+            "code": data
+        }
         text = (
             f"✅ Вы выбрали тариф: <b>{plan_name}</b>\n"
             f"💰 Стоимость: <b>{price}₽</b>\n\n"
             "Выберите удобный способ оплаты:"
         )
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_payment_methods())
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_payment_methods()
+        )
 
+    # ===== ОПЛАТА НА КАРТУ (ВРУЧНУЮ) =====
     elif data == "pay_manual":
         plan = context.user_data.get('selected_plan', {})
         text = (
@@ -85,8 +111,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Приложите скриншот платежа и укажите ваш Telegram ID: <code>{user.id}</code>\n\n"
             f"⏱ Обычно подтверждение занимает 5–30 минут."
         )
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button("main_menu"))
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_back_button("main_menu")
+        )
 
+    # ===== ОПЛАТА КРИПТОЙ (заглушка) =====
     elif data == "pay_crypto":
         plan = context.user_data.get('selected_plan', {})
         text = (
@@ -96,22 +127,33 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔗 Автоматическая выдача подписки после оплаты.\n"
             f"<i>(Функция в разработке — скоро будет доступна)</i>"
         )
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button("main_menu"))
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_back_button("main_menu")
+        )
 
+    # ===== МОЙ АККАУНТ =====
     elif data == "my_account":
         info = get_user_info(user.id)
         created = info['created_at'] if info else "Неизвестно"
+        username_display = f"@{user.username}" if user.username else "—"
         text = (
             f"👤 <b>Ваш профиль</b>\n\n"
             f"🆔 ID: <code>{user.id}</code>\n"
             f"👤 Имя: {user.full_name}\n"
-            f"📱 Username: {'@' + user.username if user.username else '—'}\n"
+            f"📱 Username: {username_display}\n"
             f"📅 С нами с: {str(created)[:10]}\n\n"
             f"📌 <b>Активная подписка:</b> Нет\n"
             f"📊 <b>Остаток трафика:</b> —"
         )
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button())
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_back_button()
+        )
 
+    # ===== ПОЛЬЗОВАТЕЛЬСКОЕ СОГЛАШЕНИЕ =====
     elif data == "terms":
         text = (
             "📋 <b>Пользовательское соглашение</b>\n\n"
@@ -145,8 +187,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "6.2. Все споры решаются путём переговоров, а при недостижении согласия — "
             "в соответствии с законодательством РФ."
         )
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button())
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_back_button()
+        )
 
+    # ===== ПОМОЩЬ =====
     elif data == "help":
         text = (
             "❓ <b>Помощь и поддержка</b>\n\n"
@@ -162,35 +209,92 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔹 <i>Бот не отвечает?</i>\n"
             "Напишите в поддержку, мы ответим в течение 24 часов."
         )
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button())
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_back_button()
+        )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка обычных текстовых сообщений"""
     save_user(update.effective_user)
     text = update.message.text.lower()
     if "привет" in text or "hi" in text:
-        await update.message.reply_text("Привет! 👋 Используйте меню:", reply_markup=get_main_menu())
+        await update.message.reply_text(
+            "Привет! 👋 Используйте меню:",
+            reply_markup=get_main_menu()
+        )
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != Config.ADMIN_ID:
-        return
-    count = get_users_count()
-    await update.message.reply_text(f"📊 Всего пользователей: {count}")
-
-
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Статистика для админа"""
     if update.effective_user.id != Config.ADMIN_ID:
         await update.message.reply_text("❌ Нет доступа")
         return
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM users WHERE date(last_active) = date('now')")
+        active_today = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM users WHERE created_at >= datetime('now', '-7 days')")
+        new_week = cursor.fetchone()[0]
+
+    text = (
+        f"📊 <b>Статистика бота</b>\n\n"
+        f"👥 Всего пользователей: <b>{total}</b>\n"
+        f"🟢 Активных сегодня: <b>{active_today}</b>\n"
+        f"🆕 Новых за неделю: <b>{new_week}</b>"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Рассылка сообщений всем пользователям"""
+    if update.effective_user.id != Config.ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа")
+        return
+
     message = " ".join(context.args) if context.args else ""
     if not message:
-        await update.message.reply_text("❌ Использование: /broadcast текст сообщения")
+        await update.message.reply_text(
+            "❌ Использование: /broadcast текст сообщения"
+        )
         return
-    await update.message.reply_text(f"📢 Начинаю рассылку...")
-    # Логика рассылки...
-    await update.message.reply_text("✅ Рассылка завершена!")
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM users WHERE is_blocked = FALSE")
+        users = cursor.fetchall()
+
+    total = len(users)
+    await update.message.reply_text(f"📢 Начинаю рассылку {total} пользователям...")
+
+    sent = 0
+    failed = 0
+    for user_row in users:
+        try:
+            await context.bot.send_message(chat_id=user_row[0], text=message)
+            sent += 1
+        except Exception as e:
+            failed += 1
+            if "blocked" in str(e).lower() or "deleted" in str(e).lower():
+                with get_db_connection() as conn:
+                    conn.execute(
+                        "UPDATE users SET is_blocked = TRUE WHERE id = ?",
+                        (user_row[0],)
+                    )
+            logger.error(f"Ошибка отправки {user_row[0]}: {e}")
+
+    await update.message.reply_text(
+        f"✅ Рассылка завершена!\n"
+        f"📨 Отправлено: {sent}\n"
+        f"❌ Ошибок: {failed}"
+    )
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Глобальный обработчик ошибок"""
     logger.error(f"Exception: {context.error}", exc_info=context.error)
