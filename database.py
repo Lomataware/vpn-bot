@@ -100,3 +100,63 @@ def get_user_info(user_id):
 def get_users_count():
     with get_db_connection() as conn:
         return conn.execute("SELECT COUNT(*) FROM users WHERE is_blocked = FALSE").fetchone()[0]
+
+
+def save_payment(user_id: int, plan: str, amount: int, method: str, 
+                 status: str = "pending", external_id: str = None) -> int:
+    """Сохраняет платёж и возвращает его ID"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        # Создаём таблицу если её нет
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                plan TEXT,
+                amount INTEGER,
+                method TEXT,
+                status TEXT DEFAULT 'pending',
+                external_id TEXT,
+                marzban_username TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                paid_at TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        ''')
+        cursor.execute('''
+            INSERT INTO payments (user_id, plan, amount, method, status, external_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, plan, amount, method, status, external_id))
+        return cursor.lastrowid
+
+
+def update_payment_status(payment_id: int, status: str, 
+                          marzban_username: str = None):
+    """Обновляет статус платежа"""
+    with get_db_connection() as conn:
+        if marzban_username:
+            conn.execute('''
+                UPDATE payments SET status = ?, marzban_username = ?, paid_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (status, marzban_username, payment_id))
+        else:
+            conn.execute(
+                "UPDATE payments SET status = ? WHERE id = ?",
+                (status, payment_id)
+            )
+
+
+def get_pending_payments(user_id: int) -> list:
+    """Получить все ожидающие платежи пользователя"""
+    with get_db_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM payments WHERE user_id = ? AND status = 'pending' ORDER BY created_at DESC",
+            (user_id,)
+        ).fetchall()
+
+
+def get_payment(payment_id: int):
+    with get_db_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM payments WHERE id = ?", (payment_id,)
+        ).fetchone()
