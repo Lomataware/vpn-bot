@@ -1,18 +1,23 @@
 import logging
 from datetime import datetime
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from config import Config
-from database import save_user, get_user_info, get_users_count, get_db_connection
-from keyboards import get_main_menu, get_back_button, get_payment_methods, get_plans
+from database import (
+    save_user, get_user_info, get_users_count, get_db_connection,
+    save_payment, update_payment_status, get_payment, get_pending_payments
+)
+from keyboards import get_main_menu, get_back_button, get_plans, get_payment_methods
+from marzban_api import marzban
+from crypto_bot import crypto_bot
 
 logger = logging.getLogger(__name__)
 
 
+# ===== /start =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
     save_user(update.effective_user)
     user = update.effective_user
     text = (
@@ -23,278 +28,380 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=get_main_menu())
 
 
+# ===== Админ-команда: выдать подписку =====
+async def issue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Использование: /issue <user_id> <days>
+    Пример: /issue 123456789 30
+    """
+    if not Config.is_admin(update.effective_user.id):
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "❌ Использование: /issue <user_id> <days>\n"
+            "Пример: /issue 123456789 30"
+        )
+        return
+
+    try:
+        user_id = int(context.args[0])
+        days = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ user_id и days должны быть числами")
+        return
+
+    # Генерируем уникальное имя для Marzban
+    username = f"tg_{user_id}_{int(datetime.now().timestamp())}"
+
+    result = marzban.create_subscription(username, days)
+    if result["success"]:
+        # Обновляем пользователя в БД
+        with get_db_connection() as conn:
+            conn.execute(
+                "UPDATE users SET marzban_username = ? WHERE id = ?",
+                (username, user_id)
+            )
+
+        # Отправляем пользователю
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    f"✅ <b>Подписка активирована!</b>\n\n"
+                    f"📅 Срок: <b>{days} дней</b>\n"
+                    f"🔗 <b>Ссылка для подключения:</b>\n"
+                    f"<code>{result['subscription_url']}</code>\n\n"
+                    f"💡 Скопируйте ссылку и вставьте в ваш VPN-клиент "
+                    f"(V2RayNG, Hiddify, Streisand и др.)"
+                ),
+                parse_mode=ParseMode.HTML
+            )
+            await update.message.reply_text(
+                f"✅ Подписка выдана пользователю {user_id} на {days} дней\n"
+                f"Username: {username}"
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                f"⚠️ Подписка создана, но не удалось отправить пользователю: {e}\n"
+                f"Username: {username}\n"
+                f"Ссылка: {result['subscription_url']}"
+            )
+    else:
+        await update.message.reply_text(f"❌ Ошибка: {result.get('error')}")
+
+
+# ===== Админ-команда: одобрить оплату на карту =====
+async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Использование: /approve <payment_id>
+    Пример: /approve 42
+    """
+    if not Config.is_admin(update.effective_user.id):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Использование: /approve <payment_id>\n"
+            "Пример: /approve 42"
+        )
+        return
+
+    try:
+        payment_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ payment_id должен быть числом")
+        return
+
+    payment = get_payment(payment_id)
+    if not payment:
+        await update.message.reply_text("❌ Платёж не найден")
+        return
+
+    if payment['status'] != 'pending':
+        await update.message.reply_text(f"⚠️ Платёж уже в статусе: {payment['status']}")
+        return
+
+    user_id = payment['user_id']
+    username = f"tg_{user_id}_{int(datetime.now().timestamp())}"
+
+    result = marzban.create_subscription(username, 30)  # 1 месяц
+    if result["success"]:
+        update_payment_status(payment_id, "approved", username)
+        with get_db_connection() as conn:
+            conn.execute(
+                "UPDATE users SET marzban_username = ? WHERE id = ?",
+                (username, user_id)
+            )
+
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    f"✅ <b>Оплата подтверждена!</b>\n\n"
+                    f"📅 Подписка на <b>1 месяц</b> активирована.\n"
+                    f"🔗 <b>Ссылка для подключения:</b>\n"
+                    f"<code>{result['subscription_url']}</code>\n\n"
+                    f"💡 Скопируйте ссылку и вставьте в ваш VPN-клиент."
+                ),
+                parse_mode=ParseMode.HTML
+            )
+            await update.message.reply_text(
+                f"✅ Платёж #{payment_id} одобрен, подписка выдана пользователю {user_id}"
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                f"⚠️ Подписка создана, но не удалось уведомить пользователя: {e}\n"
+                f"Ссылка: {result['subscription_url']}"
+            )
+    else:
+        await update.message.reply_text(f"❌ Ошибка Marzban: {result.get('error')}")
+
+
+# ===== Админ-команда: список ожидающих платежей =====
+async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает все ожидающие подтверждения платежи"""
+    if not Config.is_admin(update.effective_user.id):
+        return
+
+    with get_db_connection() as conn:
+        payments = conn.execute('''
+            SELECT p.id, p.user_id, p.plan, p.amount, p.method, p.created_at,
+                   u.username, u.first_name
+            FROM payments p
+            LEFT JOIN users u ON p.user_id = u.id
+            WHERE p.status = 'pending'
+            ORDER BY p.created_at DESC
+        ''').fetchall()
+
+    if not payments:
+        await update.message.reply_text("✅ Нет ожидающих платежей")
+        return
+
+    text = f"⏳ <b>Ожидающие платежи ({len(payments)}):</b>\n\n"
+    for p in payments:
+        user_info = f"@{p['username']}" if p['username'] else p['first_name']
+        text += (
+            f"#{p['id']} | {user_info} | {p['amount']}₽ | {p['method']}\n"
+            f"   /approve {p['id']}\n\n"
+        )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+# ===== Обработчик кнопок =====
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нажатий на inline-кнопки"""
     query = update.callback_query
     await query.answer()
     data = query.data
     user = update.effective_user
 
-    # ===== ГЛАВНОЕ МЕНЮ =====
     if data == "main_menu":
-        await query.edit_message_text(
-            "Главное меню:",
-            reply_markup=get_main_menu()
-        )
+        await query.edit_message_text("Главное меню:", reply_markup=get_main_menu())
 
-    # ===== MTProto ПРОКСИ =====
-    elif data == "mtproto":
-        text = (
-            "🔌 <b>MTProto прокси для Telegram</b>\n\n"
-            "MTProto — это встроенный в Telegram протокол, который позволяет обходить "
-            "замедление и блокировки <b>только внутри самого Telegram</b>.\n\n"
-            "⚠️ <b>Важно:</b> этот прокси НЕ даёт полноценный VPN для браузера и других приложений. "
-            "Для этого приобретите подписку.\n\n"
-            "📲 <b>Способ 1: Автоматическое подключение</b>\n"
-            "Нажмите на ссылку ниже прямо в Telegram — прокси добавится автоматически:\n"
-            f"👉 <a href='{Config.MTPROTO_LINK}'>Подключить прокси</a>\n\n"
-            "🔧 <b>Способ 2: Ручной ввод</b>\n"
-            "Если ссылка не сработала, введите данные вручную:\n"
-            "<i>Настройки → Данные и хранилище → Использование хранилища → Настройки прокси</i>\n\n"
-            f"• <b>Сервер:</b> <code>{Config.MTPROTO_SERVER}</code>\n"
-            f"• <b>Порт:</b> <code>{Config.MTPROTO_PORT}</code>\n"
-            f"• <b>Секрет:</b> <code>{Config.MTPROTO_SECRET}</code>\n\n"
-            "💡 <b>Совет:</b> для лучшего обхода блокировок используйте прокси вместе с "
-            "программами Byedpi, ByeByeDPI или Zapret."
-        )
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_back_button()
-        )
-
-    # ===== ПОКУПКА ПОДПИСКИ =====
     elif data == "buy_subscription":
         text = (
             "💳 <b>Покупка подписки</b>\n\n"
-            "Подписка даёт полноценный VPN-доступ для всех ваших устройств: "
-            "смартфона, компьютера, планшета. Работает с любыми приложениями и сайтами.\n\n"
+            "Подписка даёт полноценный VPN-доступ для всех ваших устройств.\n"
+            "Поддерживаемые протоколы: VLESS, Hysteria2.\n\n"
             "Выберите тариф:"
         )
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_plans()
-        )
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_plans())
 
-    # ===== ВЫБОР ТАРИФА (только 1 месяц) =====
     elif data == "plan_1":
         plan_name = "1 месяц"
         price = Config.PRICE_1_MONTH
-        context.user_data['selected_plan'] = {
-            "name": plan_name,
-            "price": price,
-            "code": data
-        }
+        context.user_data['selected_plan'] = {"name": plan_name, "price": price}
         text = (
-            f"✅ Вы выбрали тариф: <b>{plan_name}</b>\n"
+            f"✅ Тариф: <b>{plan_name}</b>\n"
             f"💰 Стоимость: <b>{price}₽</b>\n\n"
-            "Выберите удобный способ оплаты:"
+            "Выберите способ оплаты:"
         )
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_payment_methods()
-        )
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_payment_methods())
 
-    # ===== ОПЛАТА НА КАРТУ (ВРУЧНУЮ) =====
     elif data == "pay_manual":
         plan = context.user_data.get('selected_plan', {})
+        # Сохраняем платёж в БД
+        payment_id = save_payment(user.id, plan.get('name'), plan.get('price'), "card")
         text = (
             f"💳 <b>Оплата на карту</b>\n\n"
-            f"📦 Тариф: <b>{plan.get('name', '')}</b>\n"
-            f"💰 К оплате: <b>{plan.get('price', '')}₽</b>\n\n"
-            f"📱 <b>Переведите точную сумму</b> по реквизитам:\n"
+            f"📦 Тариф: <b>{plan.get('name')}</b>\n"
+            f"💰 К оплате: <b>{plan.get('price')}₽</b>\n"
+            f"🔢 Номер платежа: <code>#{payment_id}</code>\n\n"
+            f"📱 <b>Реквизиты для перевода:</b>\n"
             f"• <b>Банк:</b> {Config.BANK_NAME}\n"
             f"• <b>Телефон:</b> <code>{Config.SUPPORT_PHONE}</code>\n\n"
-            f"📩 После оплаты напишите в поддержку: @{Config.SUPPORT_USERNAME}\n"
-            f"Приложите скриншот платежа и укажите ваш Telegram ID: <code>{user.id}</code>\n\n"
-            f"⏱ Обычно подтверждение занимает 5–30 минут."
+            f"📩 После оплаты напишите @{Config.SUPPORT_USERNAME}:\n"
+            f"• Приложите скриншот платежа\n"
+            f"• Укажите номер платежа: <code>#{payment_id}</code>\n\n"
+            f"⏱ Подтверждение занимает 5–30 минут."
         )
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_back_button("main_menu")
-        )
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button("main_menu"))
 
-    # ===== ОПЛАТА КРИПТОЙ (заглушка) =====
     elif data == "pay_crypto":
         plan = context.user_data.get('selected_plan', {})
-        text = (
-            f"₿ <b>Оплата криптовалютой</b>\n\n"
-            f"📦 Тариф: <b>{plan.get('name', '')}</b>\n"
-            f"💰 К оплате: <b>{plan.get('price', '')}₽</b>\n\n"
-            f"🔗 Автоматическая выдача подписки после оплаты.\n"
-            f"<i>(Функция в разработке — скоро будет доступна)</i>"
+        # Создаём инвойс в CryptoBot
+        result = crypto_bot.create_invoice(
+            amount=plan.get('price'),
+            description=f"VPN {plan.get('name')}",
+            user_id=user.id
         )
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_back_button("main_menu")
-        )
+        if result["success"]:
+            payment_id = save_payment(
+                user.id, plan.get('name'), plan.get('price'), 
+                "crypto", "pending", str(result["invoice_id"])
+            )
+            context.user_data['active_invoice'] = {
+                "invoice_id": result["invoice_id"],
+                "payment_id": payment_id
+            }
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 Оплатить", url=result["pay_url"])],
+                [InlineKeyboardButton("🔄 Проверить оплату", callback_data=f"check_{result['invoice_id']}")],
+                [InlineKeyboardButton("◀️ Назад", callback_data="main_menu")]
+            ])
+            text = (
+                f"₿ <b>Оплата криптовалютой</b>\n\n"
+                f"📦 Тариф: <b>{plan.get('name')}</b>\n"
+                f"💰 К оплате: <b>{result['amount']} {result['asset']}</b>\n"
+                f"🔢 Платёж: <code>#{payment_id}</code>\n\n"
+                f"Нажмите кнопку ниже для оплаты. После оплаты нажмите «Проверить оплату»."
+            )
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        else:
+            text = (
+                f"₿ <b>Оплата криптовалютой</b>\n\n"
+                f"<i>(Функция временно недоступна)</i>\n\n"
+                f"Используйте оплату на карту."
+            )
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button("main_menu"))
 
-    # ===== МОЙ АККАУНТ =====
+    elif data.startswith("check_"):
+        invoice_id = int(data.split("_")[1])
+        invoice = context.user_data.get('active_invoice', {})
+        if not invoice or invoice.get("invoice_id") != invoice_id:
+            await query.answer("Инвойс не найден", show_alert=True)
+            return
+
+        result = crypto_bot.get_invoice(invoice_id)
+        if result["success"]:
+            if result["status"] == "paid":
+                payment_id = invoice["payment_id"]
+                username = f"tg_{user.id}_{int(datetime.now().timestamp())}"
+                marzban_result = marzban.create_subscription(username, 30)
+                if marzban_result["success"]:
+                    update_payment_status(payment_id, "paid", username)
+                    with get_db_connection() as conn:
+                        conn.execute(
+                            "UPDATE users SET marzban_username = ? WHERE id = ?",
+                            (username, user.id)
+                        )
+                    text = (
+                        f"✅ <b>Оплата прошла!</b>\n\n"
+                        f"🔗 <b>Ваша ссылка для подключения:</b>\n"
+                        f"<code>{marzban_result['subscription_url']}</code>\n\n"
+                        f"💡 Скопируйте ссылку и вставьте в ваш VPN-клиент."
+                    )
+                    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button("main_menu"))
+                else:
+                    await query.edit_message_text(f"❌ Ошибка создания подписки: {marzban_result.get('error')}")
+            elif result["status"] == "active":
+                await query.answer("Оплата ещё не получена", show_alert=True)
+            else:
+                await query.answer(f"Статус: {result['status']}", show_alert=True)
+        else:
+            await query.answer("Ошибка проверки", show_alert=True)
+
     elif data == "my_account":
         info = get_user_info(user.id)
         created = info['created_at'] if info else "Неизвестно"
-        username_display = f"@{user.username}" if user.username else "—"
+        marzban_username = info['marzban_username'] if info and 'marzban_username' in info.keys() else None
+        
         text = (
             f"👤 <b>Ваш профиль</b>\n\n"
             f"🆔 ID: <code>{user.id}</code>\n"
             f"👤 Имя: {user.full_name}\n"
-            f"📱 Username: {username_display}\n"
+            f"📱 Username: {'@' + user.username if user.username else '—'}\n"
             f"📅 С нами с: {str(created)[:10]}\n\n"
-            f"📌 <b>Активная подписка:</b> Нет\n"
-            f"📊 <b>Остаток трафика:</b> —"
-        )
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_back_button()
         )
 
-    # ===== ПОЛЬЗОВАТЕЛЬСКОЕ СОГЛАШЕНИЕ =====
+        if marzban_username:
+            user_data = marzban.get_user(marzban_username)
+            if user_data["success"]:
+                data = user_data["data"]
+                expire = datetime.fromtimestamp(data['expire']).strftime("%d.%m.%Y") if data.get('expire') else "—"
+                used = (data.get('used_traffic', 0) / 1024 / 1024 / 1024)
+                limit = (data.get('data_limit', 0) / 1024 / 1024 / 1024)
+                text += (
+                    f"📌 <b>Подписка:</b> активна\n"
+                    f"📅 Действует до: {expire}\n"
+                    f"📊 Трафик: {used:.1f} / {limit:.1f} ГБ\n\n"
+                    f"🔗 <b>Ссылка:</b>\n"
+                    f"<code>{Config.MARZBAN_URL}/sub/{marzban_username}</code>"
+                )
+            else:
+                text += "📌 <b>Подписка:</b> нет активной"
+        else:
+            text += "📌 <b>Подписка:</b> нет активной"
+
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button())
+
     elif data == "terms":
         text = (
             "📋 <b>Пользовательское соглашение</b>\n\n"
-            "<b>1. Общие положения</b>\n"
-            "1.1. Настоящее соглашение регулирует отношения между администратором сервиса "
-            "(далее — «Исполнитель») и пользователем (далее — «Заказчик»).\n"
-            "1.2. Используя сервис, вы подтверждаете полное согласие с условиями данного соглашения.\n\n"
-            "<b>2. Предмет соглашения</b>\n"
-            "2.1. Исполнитель предоставляет Заказчику доступ к VPN-сервису на условиях подписки.\n"
-            "2.2. Сервис предоставляется по принципу «как есть» (as is) без каких-либо гарантий.\n\n"
-            "<b>3. Ответственность сторон</b>\n"
-            "3.1. Заказчик самостоятельно несёт ответственность за соблюдение законодательства "
-            "своей страны при использовании сервиса.\n"
-            "3.2. Исполнитель не несёт ответственности за:\n"
-            "• Возможные перебои в работе сервиса;\n"
-            "• Скорость соединения и качество связи;\n"
-            "• Блокировки со стороны провайдеров;\n"
-            "• Действия третьих лиц.\n\n"
-            "<b>4. Оплата и возврат средств</b>\n"
-            "4.1. Оплата производится авансом за выбранный период подписки.\n"
-            "4.2. Возврат средств возможен в течение 24 часов с момента оплаты при условии, "
-            "что услугой не пользовались.\n\n"
-            "<b>5. Запрещённое использование</b>\n"
-            "5.1. Запрещается использовать сервис для:\n"
-            "• Распространения вредоносного ПО;\n"
-            "• Несанкционированного доступа к чужим системам;\n"
-            "• Нарушения авторских прав;\n"
-            "• Иной противоправной деятельности.\n\n"
-            "<b>6. Заключительные положения</b>\n"
-            "6.1. Исполнитель оставляет за собой право изменять условия соглашения в одностороннем порядке.\n"
-            "6.2. Все споры решаются путём переговоров, а при недостижении согласия — "
-            "в соответствии с законодательством РФ."
+            "1. Сервис предоставляется «как есть» без гарантий.\n"
+            "2. Вы несёте ответственность за соблюдение законодательства вашей страны.\n"
+            "3. Запрещено использовать сервис для противоправной деятельности.\n"
+            "4. Возврат возможен в течение 24 часов при условии, что услугой не пользовались.\n"
+            "5. Администратор вправе изменить условия в одностороннем порядке.\n\n"
+            "Используя сервис, вы принимаете эти условия."
         )
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_back_button()
-        )
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button())
 
-    # ===== ПОМОЩЬ =====
     elif data == "help":
         text = (
-            "❓ <b>Помощь и поддержка</b>\n\n"
-            f"📞 <b>Связь с поддержкой:</b> @{Config.SUPPORT_USERNAME}\n\n"
-            "<b>Частые вопросы:</b>\n\n"
-            "🔹 <i>Прокси не работает?</i>\n"
-            "Убедитесь, что включили его в настройках Telegram. Попробуйте перезапустить приложение.\n\n"
-            "🔹 <i>Низкая скорость?</i>\n"
-            "Это может быть связано с нагрузкой на сервер или вашим провайдером. "
-            "Для стабильной работы рекомендуем приобрести VPN-подписку.\n\n"
-            "🔹 <i>Как оплатить?</i>\n"
-            "Нажмите «Купить подписку» и выберите удобный способ оплаты.\n\n"
-            "🔹 <i>Бот не отвечает?</i>\n"
-            "Напишите в поддержку, мы ответим в течение 24 часов."
+            "❓ <b>Помощь</b>\n\n"
+            f"📞 <b>Поддержка:</b> @{Config.SUPPORT_USERNAME}\n\n"
+            "<b>Как подключиться:</b>\n"
+            "1. Купите подписку или получите у админа\n"
+            "2. Скопируйте ссылку\n"
+            "3. Вставьте в приложение: V2RayNG (Android), "
+            "Streisand (iOS), Hiddify (все платформы)\n\n"
+            "<b>Проблемы?</b> Напишите в поддержку."
         )
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_back_button()
-        )
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button())
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка обычных текстовых сообщений"""
     save_user(update.effective_user)
     text = update.message.text.lower()
     if "привет" in text or "hi" in text:
-        await update.message.reply_text(
-            "Привет! 👋 Используйте меню:",
-            reply_markup=get_main_menu()
-        )
+        await update.message.reply_text("Привет! 👋", reply_markup=get_main_menu())
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Статистика для админа"""
-    if update.effective_user.id != Config.ADMIN_ID:
-        await update.message.reply_text("❌ Нет доступа")
+    if not Config.is_admin(update.effective_user.id):
         return
-
     with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM users")
-        total = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM users WHERE date(last_active) = date('now')")
-        active_today = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM users WHERE created_at >= datetime('now', '-7 days')")
-        new_week = cursor.fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        active = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE date(last_active) = date('now')"
+        ).fetchone()[0]
+        payments_pending = conn.execute(
+            "SELECT COUNT(*) FROM payments WHERE status = 'pending'"
+        ).fetchone()[0]
+        payments_approved = conn.execute(
+            "SELECT COUNT(*) FROM payments WHERE status IN ('approved', 'paid')"
+        ).fetchone()[0]
 
     text = (
-        f"📊 <b>Статистика бота</b>\n\n"
-        f"👥 Всего пользователей: <b>{total}</b>\n"
-        f"🟢 Активных сегодня: <b>{active_today}</b>\n"
-        f"🆕 Новых за неделю: <b>{new_week}</b>"
+        f"📊 <b>Статистика</b>\n\n"
+        f"👥 Всего пользователей: {total}\n"
+        f"🟢 Активных сегодня: {active}\n\n"
+        f"💳 Платежей в ожидании: {payments_pending}\n"
+        f"✅ Оплачено: {payments_approved}"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Рассылка сообщений всем пользователям"""
-    if update.effective_user.id != Config.ADMIN_ID:
-        await update.message.reply_text("❌ Нет доступа")
-        return
-
-    message = " ".join(context.args) if context.args else ""
-    if not message:
-        await update.message.reply_text(
-            "❌ Использование: /broadcast текст сообщения"
-        )
-        return
-
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE is_blocked = FALSE")
-        users = cursor.fetchall()
-
-    total = len(users)
-    await update.message.reply_text(f"📢 Начинаю рассылку {total} пользователям...")
-
-    sent = 0
-    failed = 0
-    for user_row in users:
-        try:
-            await context.bot.send_message(chat_id=user_row[0], text=message)
-            sent += 1
-        except Exception as e:
-            failed += 1
-            if "blocked" in str(e).lower() or "deleted" in str(e).lower():
-                with get_db_connection() as conn:
-                    conn.execute(
-                        "UPDATE users SET is_blocked = TRUE WHERE id = ?",
-                        (user_row[0],)
-                    )
-            logger.error(f"Ошибка отправки {user_row[0]}: {e}")
-
-    await update.message.reply_text(
-        f"✅ Рассылка завершена!\n"
-        f"📨 Отправлено: {sent}\n"
-        f"❌ Ошибок: {failed}"
-    )
-
-
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Глобальный обработчик ошибок"""
     logger.error(f"Exception: {context.error}", exc_info=context.error)
