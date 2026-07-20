@@ -9,6 +9,7 @@ DB_PATH = 'vpn_bot.db'
 
 
 def check_db_integrity():
+    """Проверяет целостность БД и удаляет её, если повреждена"""
     if not os.path.exists(DB_PATH):
         return
     try:
@@ -30,6 +31,7 @@ def check_db_integrity():
 
 @contextmanager
 def get_db_connection():
+    """Контекстный менеджер для безопасной работы с БД"""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
@@ -50,9 +52,12 @@ def get_db_connection():
 
 
 def init_db():
+    """Инициализация базы данных"""
     check_db_integrity()
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        
+        # Таблица пользователей
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY,
@@ -60,54 +65,13 @@ def init_db():
                 first_name TEXT,
                 last_name TEXT,
                 is_blocked BOOLEAN DEFAULT FALSE,
+                marzban_username TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                plan_type TEXT,
-                amount_paid INTEGER,
-                payment_method TEXT,
-                expires_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            )
-        ''')
-
-
-def save_user(user):
-    with get_db_connection() as conn:
-        conn.execute('''
-            INSERT INTO users (id, username, first_name, last_name, last_active)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                username=excluded.username,
-                first_name=excluded.first_name,
-                last_name=excluded.last_name,
-                last_active=excluded.last_active
-        ''', (user.id, user.username or "", user.first_name or "",
-              user.last_name or "", datetime.now()))
-
-
-def get_user_info(user_id):
-    with get_db_connection() as conn:
-        return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-
-
-def get_users_count():
-    with get_db_connection() as conn:
-        return conn.execute("SELECT COUNT(*) FROM users WHERE is_blocked = FALSE").fetchone()[0]
-
-
-def save_payment(user_id: int, plan: str, amount: int, method: str, 
-                 status: str = "pending", external_id: str = None) -> int:
-    """Сохраняет платёж и возвращает его ID"""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        # Создаём таблицу если её нет
+        
+        # Таблица платежей
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS payments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,6 +87,60 @@ def save_payment(user_id: int, plan: str, amount: int, method: str,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         ''')
+        
+        # Добавляем новые колонки если таблица уже существовала
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN is_blocked BOOLEAN DEFAULT FALSE")
+        except sqlite3.OperationalError:
+            pass
+        
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN marzban_username TEXT")
+        except sqlite3.OperationalError:
+            pass
+        
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        except sqlite3.OperationalError:
+            pass
+
+
+def save_user(user):
+    """Сохранение/обновление пользователя"""
+    with get_db_connection() as conn:
+        conn.execute('''
+            INSERT INTO users (id, username, first_name, last_name, last_active)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                username=excluded.username,
+                first_name=excluded.first_name,
+                last_name=excluded.last_name,
+                last_active=excluded.last_active
+        ''', (user.id, user.username or "", user.first_name or "",
+              user.last_name or "", datetime.now()))
+
+
+def get_user_info(user_id):
+    """Получение информации о пользователе"""
+    with get_db_connection() as conn:
+        return conn.execute(
+            "SELECT * FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+
+
+def get_users_count():
+    """Количество активных пользователей"""
+    with get_db_connection() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM users WHERE is_blocked = FALSE"
+        ).fetchone()[0]
+
+
+def save_payment(user_id: int, plan: str, amount: int, method: str,
+                 status: str = "pending", external_id: str = None) -> int:
+    """Сохраняет платёж и возвращает его ID"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO payments (user_id, plan, amount, method, status, external_id)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -130,13 +148,14 @@ def save_payment(user_id: int, plan: str, amount: int, method: str,
         return cursor.lastrowid
 
 
-def update_payment_status(payment_id: int, status: str, 
+def update_payment_status(payment_id: int, status: str,
                           marzban_username: str = None):
     """Обновляет статус платежа"""
     with get_db_connection() as conn:
         if marzban_username:
             conn.execute('''
-                UPDATE payments SET status = ?, marzban_username = ?, paid_at = CURRENT_TIMESTAMP
+                UPDATE payments 
+                SET status = ?, marzban_username = ?, paid_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             ''', (status, marzban_username, payment_id))
         else:
@@ -150,12 +169,14 @@ def get_pending_payments(user_id: int) -> list:
     """Получить все ожидающие платежи пользователя"""
     with get_db_connection() as conn:
         return conn.execute(
-            "SELECT * FROM payments WHERE user_id = ? AND status = 'pending' ORDER BY created_at DESC",
+            "SELECT * FROM payments WHERE user_id = ? AND status = 'pending' "
+            "ORDER BY created_at DESC",
             (user_id,)
         ).fetchall()
 
 
 def get_payment(payment_id: int):
+    """Получить платёж по ID"""
     with get_db_connection() as conn:
         return conn.execute(
             "SELECT * FROM payments WHERE id = ?", (payment_id,)
