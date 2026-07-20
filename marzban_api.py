@@ -54,11 +54,11 @@ class MarzbanAPI:
         expire_timestamp = int((datetime.now() + timedelta(days=days)).timestamp())
         data_limit = (data_limit_gb or Config.DEFAULT_DATA_LIMIT_GB) * 1024 * 1024 * 1024
 
-        inbounds = {}
+        inbounds = []
         if Config.MARZBAN_VLESS_INBOUND:
-            inbounds[Config.MARZBAN_VLESS_INBOUND] = ["vless"]
+            inbounds.append(Config.MARZBAN_VLESS_INBOUND)
         if Config.MARZBAN_HYSTERIA_INBOUND:
-            inbounds[Config.MARZBAN_HYSTERIA_INBOUND] = ["hysteria2"]
+            inbounds.append(Config.MARZBAN_HYSTERIA_INBOUND)
 
         payload = {
             "username": username,
