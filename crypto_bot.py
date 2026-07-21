@@ -9,8 +9,8 @@ class CryptoBotAPI:
     MAINNET_URL = "https://pay.crypt.bot/api"
     TESTNET_URL = "https://testnet-pay.crypt.bot/api"
 
-    # Криптовалюты, которыми клиент может оплатить рублёвый счёт
-    ACCEPTED_ASSETS = "USDT,TON,TRX,BTC,ETH,USDC,BNB,MATIC"
+    # Точный список ассетов, разрешённых CryptoBot (из ответа API)
+    ACCEPTED_ASSETS = "USDT,TON,SOL,TRX,BTC,ETH,DOGE,LTC,BNB,USDC"
 
     def __init__(self):
         self.token = Config.CRYPTOBOT_TOKEN
@@ -32,7 +32,7 @@ class CryptoBotAPI:
             return {"success": False, "error": "CryptoBot token not configured"}
 
         payload = {
-            "currency_type": "fiat",          # ← ОБЯЗАТЕЛЬНО строчными!
+            "currency_type": "fiat",          # ОБЯЗАТЕЛЬНО строчными
             "fiat": currency,                 # RUB
             "amount": str(amount),            # сумма в рублях
             "accepted_assets": self.ACCEPTED_ASSETS,
