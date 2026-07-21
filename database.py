@@ -3,6 +3,8 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 import logging
+import secrets
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 DB_PATH = 'vpn_bot.db'
@@ -189,3 +191,46 @@ def get_payment(payment_id: int):
         return conn.execute(
             "SELECT * FROM payments WHERE id = ?", (payment_id,)
         ).fetchone()
+def get_hy2_cred(user_id: int):
+    """Возвращает sqlite3.Row (username,password,active) или None."""
+    with get_db_connection() as conn:
+        return conn.execute(
+            "SELECT user_id, username, password, active FROM hy2_credentials WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+
+
+def ensure_hy2_cred(user_id: int):
+    """Ленивое создание: если у пользователя нет Hysteria2-учётки — создаёт.
+    Возвращает (username, password). Именно это даёт конфиги СТАРЫМ пользователям
+    по первому нажатию кнопки — без массовой миграции."""
+    row = get_hy2_cred(user_id)
+    if row:
+        return row["username"], row["password"]
+    username = f"tg{user_id}"
+    password = secrets.token_urlsafe(16)
+    with get_db_connection() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO hy2_credentials (user_id, username, password, active, created_at) "
+            "VALUES (?, ?, ?, 1, ?)",
+            (user_id, username, password, datetime.now().isoformat())
+        )
+    return username, password
+
+
+def set_hy2_active(user_id: int, active: bool):
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE hy2_credentials SET active = ? WHERE user_id = ?",
+            (1 if active else 0, user_id)
+        )
+
+
+def check_hy2_auth(username: str, password: str) -> bool:
+    """Используется auth-сервером: активна ли пара user/pass."""
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT active FROM hy2_credentials WHERE username = ? AND password = ?",
+            (username, password)
+        ).fetchone()
+    return bool(row and row["active"])
