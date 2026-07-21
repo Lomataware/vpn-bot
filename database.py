@@ -70,7 +70,15 @@ def init_db():
                 last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS hy2_credentials (
+                user_id    INTEGER PRIMARY KEY,
+                username   TEXT NOT NULL UNIQUE,
+                password   TEXT NOT NULL,
+                active     INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT
+            )
+        ''')
         # Таблица платежей
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS payments (
