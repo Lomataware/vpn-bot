@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime
+from urllib.parse import quote
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
@@ -7,7 +8,8 @@ from telegram.ext import ContextTypes
 from config import Config
 from database import (
     save_user, get_user_info, get_users_count, get_db_connection,
-    save_payment, update_payment_status, get_payment, get_pending_payments
+    save_payment, update_payment_status, get_payment, get_pending_payments,
+    ensure_hy2_cred, get_hy2_cred
 )
 from keyboards import get_main_menu, get_back_button, get_plans, get_payment_methods
 from marzban_api import marzban
@@ -17,13 +19,30 @@ logger = logging.getLogger(__name__)
 
 
 def _row_get(row, key, default=None):
-    """Безопасное чтение колонки из sqlite3.Row"""
     if row is None:
         return default
     try:
         return row[key]
     except (KeyError, IndexError, TypeError):
         return default
+
+
+# ===== Hysteria2: генерация per-user URI на все сервера =====
+def build_hy2_block(user_id: int) -> str:
+    """Возвращает готовый текст-блок с Hysteria2-конфигами или '' если не настроено."""
+    servers = Config.get_hy2_servers()
+    if not servers:
+        return ""
+    username, password = ensure_hy2_cred(user_id)
+    u = quote(username, safe="")
+    p = quote(password, safe="")
+    lines = ["🌀 <b>Hysteria2</b> (высокая скорость / обход блокировок):"]
+    for s in servers:
+        uri = (f"hysteria2://{u}:{p}@{s['host']}:{Config.HY2_PORT}"
+               f"?sni={s['host']}&insecure=0#{s['label']} [Hysteria2]")
+        lines.append(f"• <b>{s['label']}</b>\n<code>{uri}</code>")
+    lines.append("\n💡 Вставьте в Hiddify / NekoBox / v2rayN.")
+    return "\n".join(lines)
 
 
 # ===== /start =====
@@ -60,17 +79,16 @@ async def issue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with get_db_connection() as conn:
             conn.execute("UPDATE users SET marzban_username = ? WHERE id = ?", (username, user_id))
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    f"✅ <b>Подписка активирована!</b>\n\n"
-                    f"📅 Срок: <b>{days} дней</b>\n"
-                    f"🔗 <b>Ссылка для подключения:</b>\n"
-                    f"<code>{result['subscription_url']}</code>\n\n"
-                    f"💡 Скопируйте ссылку и вставьте в Hiddify / V2RayNG / Streisand."
-                ),
-                parse_mode=ParseMode.HTML
+            hy2 = build_hy2_block(user_id)
+            msg = (
+                f"✅ <b>Подписка активирована!</b>\n\n"
+                f"📅 Срок: <b>{days} дней</b>\n"
+                f"🔗 <b>VLESS-ссылка:</b>\n<code>{result['subscription_url']}</code>\n\n"
             )
+            if hy2:
+                msg += hy2 + "\n\n"
+            msg += "💡 Скопируйте ссылки и вставьте в Hiddify / V2RayNG / Streisand."
+            await context.bot.send_message(chat_id=user_id, text=msg, parse_mode=ParseMode.HTML)
             await update.message.reply_text(f"✅ Подписка выдана {user_id} на {days} дн. ({username})")
         except Exception as e:
             await update.message.reply_text(
@@ -110,17 +128,16 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with get_db_connection() as conn:
             conn.execute("UPDATE users SET marzban_username = ? WHERE id = ?", (username, user_id))
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    f"✅ <b>Оплата подтверждена!</b>\n\n"
-                    f"📅 Подписка на <b>1 месяц</b> активирована.\n"
-                    f"🔗 <b>Ссылка для подключения:</b>\n"
-                    f"<code>{result['subscription_url']}</code>\n\n"
-                    f"💡 Скопируйте ссылку и вставьте в VPN-клиент."
-                ),
-                parse_mode=ParseMode.HTML
+            hy2 = build_hy2_block(user_id)
+            msg = (
+                f"✅ <b>Оплата подтверждена!</b>\n\n"
+                f"📅 Подписка на <b>1 месяц</b> активирована.\n"
+                f"🔗 <b>VLESS-ссылка:</b>\n<code>{result['subscription_url']}</code>\n\n"
             )
+            if hy2:
+                msg += hy2 + "\n\n"
+            msg += "💡 Скопируйте ссылки и вставьте в VPN-клиент."
+            await context.bot.send_message(chat_id=user_id, text=msg, parse_mode=ParseMode.HTML)
             await update.message.reply_text(f"✅ Платёж #{payment_id} одобрен, подписка выдана {user_id}")
         except Exception as e:
             await update.message.reply_text(
@@ -192,7 +209,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = (
                 "💳 <b>Покупка подписки</b>\n\n"
                 "Подписка даёт полноценный VPN-доступ для всех ваших устройств.\n"
-                "Протоколы: VLESS (REALITY).\n\nВыберите тариф:"
+                "Протоколы: VLESS (REALITY) + Hysteria2.\n\nВыберите тариф:"
             )
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_plans())
 
@@ -281,11 +298,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     update_payment_status(payment_id, "paid", username)
                     with get_db_connection() as conn:
                         conn.execute("UPDATE users SET marzban_username = ? WHERE id = ?", (username, user.id))
+                    hy2 = build_hy2_block(user.id)
                     text = (
                         f"✅ <b>Оплата прошла!</b>\n\n"
-                        f"🔗 <b>Ссылка для подключения:</b>\n<code>{mr['subscription_url']}</code>\n\n"
-                        f"💡 Вставьте в Hiddify / V2RayNG / Streisand."
+                        f"🔗 <b>VLESS-ссылка:</b>\n<code>{mr['subscription_url']}</code>\n\n"
                     )
+                    if hy2:
+                        text += hy2 + "\n\n"
+                    text += "💡 Вставьте в Hiddify / V2RayNG / Streisand."
                     await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button("main_menu"))
                 else:
                     await query.edit_message_text(f"❌ Ошибка выдачи подписки: {mr.get('error')}")
@@ -325,13 +345,38 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"📅 Действует до: {expire_str}\n"
                         f"📊 Использовано: {used:.2f} ГБ / {limit_str}\n"
                     )
-                    keyboard_rows.append([InlineKeyboardButton("🔄 Получить ссылку ещё раз", callback_data="resend_link")])
+                    keyboard_rows.append([InlineKeyboardButton("🔄 Получить VLESS-ссылку ещё раз", callback_data="resend_link")])
                 else:
                     text += "📌 <b>Подписка:</b> данные недоступны\n"
             else:
                 text += "📌 <b>Подписка:</b> нет активной\n\nКупите подписку в меню 💳"
+
+            # Hysteria2 — показываем кнопку, если протокол настроен
+            if Config.get_hy2_servers():
+                hy_row = get_hy2_cred(user.id)
+                hy_status = "🟢 подключён" if (hy_row and hy_row["active"]) else "⚪ будет создан при открытии"
+                text += f"\n🌀 <b>Hysteria2:</b> {hy_status}\n"
+                keyboard_rows.append([InlineKeyboardButton("🌀 Мои Hysteria2 конфиги", callback_data="hy2_configs")])
+
             keyboard_rows.append([InlineKeyboardButton("◀️ Назад в меню", callback_data="main_menu")])
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard_rows))
+
+        elif data == "hy2_configs":
+            # Ленивая выдача: ensure_hy2_cred создаст учётку СТАРОМУ пользователю по первому нажатию
+            block = build_hy2_block(user.id)
+            if not block:
+                await query.answer("Hysteria2 пока не настроен", show_alert=True)
+                return
+            text = (
+                "🌀 <b>Ваши Hysteria2 конфиги</b>\n\n"
+                "Персональные — у каждого свой ключ, можно отозвать отдельно.\n\n"
+                + block
+            )
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ В профиль", callback_data="my_account")],
+                [InlineKeyboardButton("🏠 В меню", callback_data="main_menu")]
+            ])
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
         elif data == "resend_link":
             info = get_user_info(user.id)
@@ -343,10 +388,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if ud["success"] and ud["data"].get("subscription_url"):
                 sub = ud["data"]["subscription_url"]
                 full_url = f"{Config.MARZBAN_URL.rstrip('/')}{sub}" if sub.startswith('/') else sub
-                text = (
-                    f"🔗 <b>Ваша ссылка подписки:</b>\n<code>{full_url}</code>\n\n"
-                    f"💡 Скопируйте и вставьте в Hiddify / V2RayNG / Streisand."
-                )
+                hy2 = build_hy2_block(user.id)
+                text = f"🔗 <b>VLESS-ссылка:</b>\n<code>{full_url}</code>\n\n"
+                if hy2:
+                    text += hy2 + "\n\n"
+                text += "💡 Скопируйте и вставьте в Hiddify / V2RayNG / Streisand."
                 await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button("my_account"))
             else:
                 await query.answer("Не удалось получить ссылку", show_alert=True)
@@ -369,13 +415,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📞 <b>Поддержка:</b> @{Config.SUPPORT_USERNAME}\n\n"
                 "<b>Как подключиться:</b>\n"
                 "1. Купите подписку или получите у админа\n"
-                "2. Скопируйте ссылку\n"
+                "2. Скопируйте ссылки (VLESS и/или Hysteria2)\n"
                 "3. Вставьте в приложение:\n"
                 "   • Hiddify (все платформы) — рекомендуется\n"
                 "   • V2RayNG ≥ 1.8 (Android)\n"
                 "   • Streisand (iOS)\n"
                 "   • v2rayN ≥ 6.0 (Windows)\n\n"
-                "⚠️ Старые клиенты не поддерживают REALITY.\n\n"
+                "🌀 <b>Hysteria2</b> — используйте, если VLESS тормозит/блокируется.\n\n"
                 "<b>Проблемы?</b> Напишите в поддержку."
             )
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button())
