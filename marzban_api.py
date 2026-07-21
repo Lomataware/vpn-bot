@@ -54,11 +54,18 @@ class MarzbanAPI:
         expire_timestamp = int((datetime.now() + timedelta(days=days)).timestamp())
         data_limit = (data_limit_gb or Config.DEFAULT_DATA_LIMIT_GB) * 1024 * 1024 * 1024
 
-        inbounds = []
+        # Формируем inbounds как СЛОВАРЬ (dict), а не список, чтобы избежать ошибки 500
+        inbounds_dict = {}
+        proxies_dict = {}
+
         if Config.MARZBAN_VLESS_INBOUND:
-            inbounds.append(Config.MARZBAN_VLESS_INBOUND)
+            inbounds_dict["vless"] = [Config.MARZBAN_VLESS_INBOUND]
+            # Включаем xtls-rprx-vision для максимальной скорости VLESS
+            proxies_dict["vless"] = {"flow": "xtls-rprx-vision"}
+            
         if Config.MARZBAN_HYSTERIA_INBOUND:
-            inbounds.append(Config.MARZBAN_HYSTERIA_INBOUND)
+            inbounds_dict["hysteria2"] = [Config.MARZBAN_HYSTERIA_INBOUND]
+            proxies_dict["hysteria2"] = {}
 
         payload = {
             "username": username,
@@ -66,7 +73,8 @@ class MarzbanAPI:
             "expire": expire_timestamp,
             "data_limit": data_limit,
             "data_limit_reset_strategy": "no_reset",
-            "inbounds": inbounds,
+            "inbounds": inbounds_dict,
+            "proxies": proxies_dict,
             "note": f"Created via Telegram bot at {datetime.now().isoformat()}"
         }
 
