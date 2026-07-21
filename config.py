@@ -37,6 +37,33 @@ class Config:
         if x.strip().isdigit()
     ]
 
-    @classmethod
+        @classmethod
     def is_admin(cls, user_id: int) -> bool:
         return user_id == cls.ADMIN_ID or user_id in cls.ADDITIONAL_ADMINS
+
+    # ===== Hysteria2 =====
+    HY2_PORT = int(os.getenv("HY2_PORT", "443"))
+    HY2_AUTH_TOKEN = os.getenv("HY2_AUTH_TOKEN", "")
+    HY2_AUTH_HOST = os.getenv("HY2_AUTH_HOST", "0.0.0.0")
+    HY2_AUTH_PORT = int(os.getenv("HY2_AUTH_PORT", "9443"))
+    HY2_AUTH_CERTFILE = os.getenv("HY2_AUTH_CERTFILE", "/etc/letsencrypt/live/de.shqq.ru/fullchain.pem")
+    HY2_AUTH_KEYFILE = os.getenv("HY2_AUTH_KEYFILE", "/etc/letsencrypt/live/de.shqq.ru/privkey.pem")
+    _HY2_SERVERS_RAW = os.getenv("HY2_SERVERS", "")
+
+    @classmethod
+    def get_hy2_servers(cls):
+        """Парсит HY2_SERVERS='host|label,host|label' в список dict.
+        Пусто -> [] (тогда Hysteria2 в боте не показывается)."""
+        result = []
+        for item in cls._HY2_SERVERS_RAW.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if "|" in item:
+                host, label = item.split("|", 1)
+            else:
+                host, label = item, item
+            host = host.strip()
+            if host:
+                result.append({"host": host, "label": label.strip()})
+        return result
