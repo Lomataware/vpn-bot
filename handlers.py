@@ -202,7 +202,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "💳 <b>Покупка подписки</b>\n\n"
             "Подписка даёт полноценный VPN-доступ для всех ваших устройств.\n"
-            "Поддерживаемые протоколы: VLESS, Hysteria2.\n\n"
+            "Поддерживаемые приложения: Hiddify(телефоны), V2rayN(пк) ТОЛЬКО ЭТИ!!!.\n"
+            "Поддерживаемые протоколы: VLESS, Hysteria2(В будующем).\n\n"
             "Выберите тариф:"
         )
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_plans())
