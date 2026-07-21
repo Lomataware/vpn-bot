@@ -31,13 +31,12 @@ class Config:
     PRICE_1_MONTH = int(os.getenv('PRICE_1_MONTH', '100'))
 
     # ===== ADMIN COMMANDS =====
-    # Дополнительные админы через запятую (опционально)
     ADDITIONAL_ADMINS = [
-        int(x.strip()) for x in os.getenv('ADDITIONAL_ADMINS', '').split(',') 
+        int(x.strip()) for x in os.getenv('ADDITIONAL_ADMINS', '').split(',')
         if x.strip().isdigit()
     ]
 
-        @classmethod
+    @classmethod
     def is_admin(cls, user_id: int) -> bool:
         return user_id == cls.ADMIN_ID or user_id in cls.ADDITIONAL_ADMINS
 
