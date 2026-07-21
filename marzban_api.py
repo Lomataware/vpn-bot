@@ -33,7 +33,6 @@ class MarzbanAPI:
             if response.status_code == 200:
                 data = response.json()
                 self.token = data["access_token"]
-                # Токен живёт ~12 часов, обновляем за час до истечения
                 self.token_expires = datetime.now() + timedelta(hours=11)
                 logger.info("Marzban: успешно авторизован")
             else:
@@ -48,24 +47,27 @@ class MarzbanAPI:
         return {"Authorization": f"Bearer {self.token}"}
 
     def create_subscription(self, username: str, days: int, data_limit_gb: int = None) -> dict:
-        """
-        Создаёт пользователя в Marzban и возвращает ссылку на подписку.
-        """
+        """Создаёт пользователя в Marzban и возвращает ссылку на подписку."""
         expire_timestamp = int((datetime.now() + timedelta(days=days)).timestamp())
-        data_limit = (data_limit_gb or Config.DEFAULT_DATA_LIMIT_GB) * 1024 * 1024 * 1024
 
-        # Формируем inbounds как СЛОВАРЬ (dict), а не список, чтобы избежать ошибки 500
-        inbounds_dict = {}
-        proxies_dict = {}
+        # Безопасная обработка безлимита
+        limit_gb = data_limit_gb if data_limit_gb is not None else Config.DEFAULT_DATA_LIMIT_GB
+        data_limit = limit_gb * 1024 * 1024 * 1024 if limit_gb > 0 else 0
+
+        inbounds = {}
+        proxies = {}
 
         if Config.MARZBAN_VLESS_INBOUND:
-            inbounds_dict["vless"] = [Config.MARZBAN_VLESS_INBOUND]
-            # Включаем xtls-rprx-vision для максимальной скорости VLESS
-            proxies_dict["vless"] = {"flow": "xtls-rprx-vision"}
-            
+            inbounds["vless"] = [Config.MARZBAN_VLESS_INBOUND]
+            proxies["vless"] = {"flow": "xtls-rprx-vision"}
+
         if Config.MARZBAN_HYSTERIA_INBOUND:
-            inbounds_dict["hysteria2"] = [Config.MARZBAN_HYSTERIA_INBOUND]
-            proxies_dict["hysteria2"] = {}
+            inbounds["hysteria2"] = [Config.MARZBAN_HYSTERIA_INBOUND]
+            proxies["hysteria2"] = {}
+
+        # Если нет ни одного инбаунда — ошибка
+        if not inbounds:
+            return {"success": False, "error": "No inbounds configured in .env"}
 
         payload = {
             "username": username,
@@ -73,8 +75,8 @@ class MarzbanAPI:
             "expire": expire_timestamp,
             "data_limit": data_limit,
             "data_limit_reset_strategy": "no_reset",
-            "inbounds": inbounds_dict,
-            "proxies": proxies_dict,
+            "inbounds": inbounds,
+            "proxies": proxies,
             "note": f"Created via Telegram bot at {datetime.now().isoformat()}"
         }
 
@@ -105,6 +107,7 @@ class MarzbanAPI:
             return {"success": False, "error": str(e)}
 
     def get_user(self, username: str) -> dict:
+        """Получает информацию о пользователе"""
         try:
             response = requests.get(
                 f"{self.base_url}/api/user/{username}",
