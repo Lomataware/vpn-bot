@@ -9,12 +9,11 @@
 """
 import ssl
 import hmac
-import json
 import logging
 from aiohttp import web
 
 from config import Config
-from database import check_hy2_auth
+from database import check_hy2_auth, init_db
 
 logging.basicConfig(
     format='%(asctime)s - hy2auth - %(levelname)s - %(message)s',
@@ -52,7 +51,7 @@ async def handle_auth(request: web.Request):
 
     username, password = auth_str.split(":", 1)
 
-    # 3) Проверка пары по БД
+    # 3) Проверка пары + срока по БД
     if check_hy2_auth(username, password):
         logger.info("auth OK user=%s addr=%s", username, addr)
         return _ok(username)
@@ -69,6 +68,9 @@ def main():
     if not Config.HY2_AUTH_TOKEN:
         logger.error("HY2_AUTH_TOKEN не задан в .env!")
         return
+
+    # Гарантируем актуальную схему БД (в т.ч. колонку expires_at) до первой проверки
+    init_db()
 
     app = web.Application()
     app.router.add_post("/hy2auth/{token}", handle_auth)
