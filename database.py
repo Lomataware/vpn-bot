@@ -4,7 +4,6 @@ from contextlib import contextmanager
 from datetime import datetime
 import logging
 import secrets
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 DB_PATH = 'vpn_bot.db'
@@ -58,8 +57,7 @@ def init_db():
     check_db_integrity()
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        
-        # Таблица пользователей
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY,
@@ -72,16 +70,19 @@ def init_db():
                 last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # Hysteria2-учётки с привязкой к сроку подписки
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS hy2_credentials (
                 user_id    INTEGER PRIMARY KEY,
                 username   TEXT NOT NULL UNIQUE,
                 password   TEXT NOT NULL,
                 active     INTEGER NOT NULL DEFAULT 1,
+                expires_at TEXT,
                 created_at TEXT
             )
         ''')
-        # Таблица платежей
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS payments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,22 +98,18 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         ''')
-        
-        # Добавляем новые колонки если таблица уже существовала
-        try:
-            cursor.execute("ALTER TABLE users ADD COLUMN is_blocked BOOLEAN DEFAULT FALSE")
-        except sqlite3.OperationalError:
-            pass
-        
-        try:
-            cursor.execute("ALTER TABLE users ADD COLUMN marzban_username TEXT")
-        except sqlite3.OperationalError:
-            pass
-        
-        try:
-            cursor.execute("ALTER TABLE users ADD COLUMN last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        except sqlite3.OperationalError:
-            pass
+
+        # Миграции для уже существующих таблиц
+        for stmt in (
+            "ALTER TABLE users ADD COLUMN is_blocked BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE users ADD COLUMN marzban_username TEXT",
+            "ALTER TABLE users ADD COLUMN last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            "ALTER TABLE hy2_credentials ADD COLUMN expires_at TEXT",
+        ):
+            try:
+                cursor.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
 
 
 def save_user(user):
@@ -131,7 +128,6 @@ def save_user(user):
 
 
 def get_user_info(user_id):
-    """Получение информации о пользователе"""
     with get_db_connection() as conn:
         return conn.execute(
             "SELECT * FROM users WHERE id = ?", (user_id,)
@@ -139,7 +135,6 @@ def get_user_info(user_id):
 
 
 def get_users_count():
-    """Количество активных пользователей"""
     with get_db_connection() as conn:
         return conn.execute(
             "SELECT COUNT(*) FROM users WHERE is_blocked = FALSE"
@@ -148,7 +143,6 @@ def get_users_count():
 
 def save_payment(user_id: int, plan: str, amount: int, method: str,
                  status: str = "pending", external_id: str = None) -> int:
-    """Сохраняет платёж и возвращает его ID"""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -160,7 +154,6 @@ def save_payment(user_id: int, plan: str, amount: int, method: str,
 
 def update_payment_status(payment_id: int, status: str,
                           marzban_username: str = None):
-    """Обновляет статус платежа"""
     with get_db_connection() as conn:
         if marzban_username:
             conn.execute('''
@@ -176,7 +169,6 @@ def update_payment_status(payment_id: int, status: str,
 
 
 def get_pending_payments(user_id: int) -> list:
-    """Получить все ожидающие платежи пользователя"""
     with get_db_connection() as conn:
         return conn.execute(
             "SELECT * FROM payments WHERE user_id = ? AND status = 'pending' "
@@ -186,39 +178,64 @@ def get_pending_payments(user_id: int) -> list:
 
 
 def get_payment(payment_id: int):
-    """Получить платёж по ID"""
     with get_db_connection() as conn:
         return conn.execute(
             "SELECT * FROM payments WHERE id = ?", (payment_id,)
         ).fetchone()
+
+
+# ===== Hysteria2 =====
+
 def get_hy2_cred(user_id: int):
-    """Возвращает sqlite3.Row (username,password,active) или None."""
+    """Возвращает запись (username,password,active,expires_at) или None."""
     with get_db_connection() as conn:
         return conn.execute(
-            "SELECT user_id, username, password, active FROM hy2_credentials WHERE user_id = ?",
+            "SELECT user_id, username, password, active, expires_at "
+            "FROM hy2_credentials WHERE user_id = ?",
             (user_id,)
         ).fetchone()
 
 
-def ensure_hy2_cred(user_id: int):
-    """Ленивое создание: если у пользователя нет Hysteria2-учётки — создаёт.
-    Возвращает (username, password). Именно это даёт конфиги СТАРЫМ пользователям
-    по первому нажатию кнопки — без массовой миграции."""
+def hy2_access_valid(user_id: int) -> bool:
+    """Есть ли у пользователя активный и НЕ истёкший Hysteria2-доступ."""
+    row = get_hy2_cred(user_id)
+    if not row or not row["active"]:
+        return False
+    exp = row["expires_at"]
+    if not exp:
+        return False
+    try:
+        return datetime.fromisoformat(exp) > datetime.now()
+    except (ValueError, TypeError):
+        return False
+
+
+def upsert_hy2_cred(user_id: int, expires_at: datetime):
+    """Создаёт или ПРОДЛЕВАЕТ Hysteria2-доступ до expires_at.
+    Вызывается ТОЛЬКО при выдаче/продлении подписки — не по нажатию кнопки."""
+    exp_iso = expires_at.isoformat()
     row = get_hy2_cred(user_id)
     if row:
+        with get_db_connection() as conn:
+            conn.execute(
+                "UPDATE hy2_credentials SET active = 1, expires_at = ? WHERE user_id = ?",
+                (exp_iso, user_id)
+            )
         return row["username"], row["password"]
     username = f"tg{user_id}"
     password = secrets.token_urlsafe(16)
     with get_db_connection() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO hy2_credentials (user_id, username, password, active, created_at) "
-            "VALUES (?, ?, ?, 1, ?)",
-            (user_id, username, password, datetime.now().isoformat())
+            "INSERT OR IGNORE INTO hy2_credentials "
+            "(user_id, username, password, active, expires_at, created_at) "
+            "VALUES (?, ?, ?, 1, ?, ?)",
+            (user_id, username, password, exp_iso, datetime.now().isoformat())
         )
     return username, password
 
 
 def set_hy2_active(user_id: int, active: bool):
+    """Ручной отзыв/возврат доступа (для админа)."""
     with get_db_connection() as conn:
         conn.execute(
             "UPDATE hy2_credentials SET active = ? WHERE user_id = ?",
@@ -227,10 +244,19 @@ def set_hy2_active(user_id: int, active: bool):
 
 
 def check_hy2_auth(username: str, password: str) -> bool:
-    """Используется auth-сервером: активна ли пара user/pass."""
+    """Auth-сервер: пускаем, только если пара верна, активна И срок не истёк."""
     with get_db_connection() as conn:
         row = conn.execute(
-            "SELECT active FROM hy2_credentials WHERE username = ? AND password = ?",
+            "SELECT active, expires_at FROM hy2_credentials "
+            "WHERE username = ? AND password = ?",
             (username, password)
         ).fetchone()
-    return bool(row and row["active"])
+    if not row or not row["active"]:
+        return False
+    exp = row["expires_at"]
+    if not exp:
+        return False
+    try:
+        return datetime.fromisoformat(exp) > datetime.now()
+    except (ValueError, TypeError):
+        return False
