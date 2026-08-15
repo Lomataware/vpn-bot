@@ -298,13 +298,43 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not invoice or invoice.get("invoice_id") != invoice_id:
                 await query.answer("Сначала создайте платёж", show_alert=True)
                 return
+            
+            # Проверяем статус платежа в БД для предотвращения повторной выдачи
+            payment_id = invoice["payment_id"]
+            payment_record = get_payment(payment_id)
+            if payment_record and payment_record['status'] == 'paid':
+                # Платёж уже обработан, возвращаем существующую подписку
+                mu = payment_record.get('marzban_username')
+                if mu:
+                    ud = marzban.get_user(mu)
+                    if ud["success"]:
+                        d = ud["data"]
+                        expire = d.get('expire')
+                        expire_str = datetime.fromtimestamp(expire).strftime("%d.%m.%Y") if expire else "бессрочно"
+                        hy2 = build_hy2_block(user.id)
+                        text = (
+                            f"✅ <b>Ваша подписка активна!</b>\n\n"
+                            f"📅 Действует до: <b>{expire_str}</b>\n"
+                            f"🔗 <b>VLESS-ссылка:</b>\n<code>{ud['subscription_url']}</code>\n\n"
+                        )
+                        if hy2:
+                            text += hy2 + "\n\n"
+                        text += "💡 Вставьте в Hiddify / V2RayNG / Streisand."
+                        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button("main_menu"))
+                        return
+                
             result = crypto_bot.get_invoice(invoice_id)
             if not result["success"]:
                 await query.answer("Ошибка проверки", show_alert=True)
                 return
             status = result["status"]
             if status == "paid":
-                payment_id = invoice["payment_id"]
+                # Повторно проверяем статус в БД после получения статуса от CryptoBot
+                payment_record = get_payment(payment_id)
+                if payment_record and payment_record['status'] == 'paid':
+                    await query.answer("Платёж уже обработан. Проверьте 'Мой аккаунт'.", show_alert=True)
+                    return
+                
                 username = f"tg_{user.id}_{int(datetime.now().timestamp())}"
                 mr = marzban.create_subscription(username, 30)
                 if mr["success"]:
