@@ -212,26 +212,48 @@ def hy2_access_valid(user_id: int) -> bool:
 
 def upsert_hy2_cred(user_id: int, expires_at: datetime):
     """Создаёт или ПРОДЛЕВАЕТ Hysteria2-доступ до expires_at.
-    Вызывается ТОЛЬКО при выдаче/продлении подписки — не по нажатию кнопки."""
+    Вызывается ТОЛЬКО при выдаче/продлении подписки — не по нажатию кнопки.
+    Использует IMMEDIATE транзакцию для предотвращения race condition.
+    SQLite не поддерживает FOR UPDATE, поэтому используем BEGIN IMMEDIATE + INSERT OR REPLACE."""
     exp_iso = expires_at.isoformat()
-    row = get_hy2_cred(user_id)
-    if row:
-        with get_db_connection() as conn:
-            conn.execute(
-                "UPDATE hy2_credentials SET active = 1, expires_at = ? WHERE user_id = ?",
-                (exp_iso, user_id)
-            )
-        return row["username"], row["password"]
-    username = f"tg{user_id}"
-    password = secrets.token_urlsafe(16)
+    
     with get_db_connection() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO hy2_credentials "
-            "(user_id, username, password, active, expires_at, created_at) "
-            "VALUES (?, ?, ?, 1, ?, ?)",
-            (user_id, username, password, exp_iso, datetime.now().isoformat())
-        )
-    return username, password
+        cursor = conn.cursor()
+        # BEGIN IMMEDIATE блокирует БД от записи другими подключениями до коммита
+        cursor.execute("BEGIN IMMEDIATE")
+        
+        try:
+            # Проверяем существующую запись
+            cursor.execute(
+                "SELECT user_id, username, password, active, expires_at "
+                "FROM hy2_credentials WHERE user_id = ?",
+                (user_id,)
+            )
+            row = cursor.fetchone()
+            
+            if row:
+                # Обновляем существующую запись (пароль не меняем, только срок)
+                cursor.execute(
+                    "UPDATE hy2_credentials SET active = 1, expires_at = ? WHERE user_id = ?",
+                    (exp_iso, user_id)
+                )
+                conn.commit()
+                return row["username"], row["password"]
+            
+            # Создаём новую запись
+            username = f"tg{user_id}"
+            password = secrets.token_urlsafe(16)
+            cursor.execute(
+                "INSERT INTO hy2_credentials "
+                "(user_id, username, password, active, expires_at, created_at) "
+                "VALUES (?, ?, ?, 1, ?, ?)",
+                (user_id, username, password, exp_iso, datetime.now().isoformat())
+            )
+            conn.commit()
+            return username, password
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def set_hy2_active(user_id: int, active: bool):
@@ -244,7 +266,10 @@ def set_hy2_active(user_id: int, active: bool):
 
 
 def check_hy2_auth(username: str, password: str) -> bool:
-    """Auth-сервер: пускаем, только если пара верна, активна И срок не истёк."""
+    """Auth-сервер: пускаем, только если пара верна, активна И срок не истёк.
+    Сравнивает оригинальный пароль с сохранённым в БД.
+    ПРИМЕЧАНИЕ: В текущей реализации пароль хранится в открытом виде для совместимости с URI.
+    Для повышения безопасности рекомендуется добавить отдельное поле password_hash."""
     with get_db_connection() as conn:
         row = conn.execute(
             "SELECT active, expires_at FROM hy2_credentials "
