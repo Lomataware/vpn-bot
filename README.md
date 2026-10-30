@@ -116,7 +116,7 @@ cat /root/marzban_node_cert.pem
 Направьте A-запись поддомена ноды (например, `nl.example.com`) на IP второго сервера и запустите на нём `install_node.sh`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ВАШ_НИК/vpn-bot/main/install_node.sh -o install_node.sh
+curl -fsSL https://raw.githubusercontent.com/Lomataware/vpn-bot/main/install_node.sh -o install_node.sh
 bash install_node.sh
 ```
 Скрипт запросит домен ноды, название локации, IP и домен главного сервера, `HY2_AUTH_TOKEN` и попросит вставить содержимое `/root/marzban_node_cert.pem`.
