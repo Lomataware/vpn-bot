@@ -1,4 +1,4 @@
-import requests
+import httpx
 import logging
 from config import Config
 
@@ -9,7 +9,6 @@ class CryptoBotAPI:
     MAINNET_URL = "https://pay.crypt.bot/api"
     TESTNET_URL = "https://testnet-pay.crypt.bot/api"
 
-    # Точный список ассетов, разрешённых CryptoBot (из ответа API)
     ACCEPTED_ASSETS = "USDT,TON,SOL,TRX,BTC,ETH,DOGE,LTC,BNB,USDC"
 
     def __init__(self):
@@ -22,19 +21,16 @@ class CryptoBotAPI:
             "Accept": "application/json"
         }
 
-    def create_invoice(self, amount: float, currency: str = "RUB",
-                       description: str = "", user_id: int = None) -> dict:
-        """
-        Создаёт FIAT-инвойс в рублях. Клиент видит сумму в ₽ и платит
-        эквивалент в крипте по курсу CryptoBot.
-        """
+    async def create_invoice(self, amount: float, currency: str = "RUB",
+                             description: str = "", user_id: int = None) -> dict:
+        """Создаёт FIAT-инвойс в рублях (асинхронно)."""
         if not self.token:
             return {"success": False, "error": "CryptoBot token not configured"}
 
         payload = {
-            "currency_type": "fiat",          # ОБЯЗАТЕЛЬНО строчными
-            "fiat": currency,                 # RUB
-            "amount": str(amount),            # сумма в рублях
+            "currency_type": "fiat",
+            "fiat": currency,
+            "amount": str(amount),
             "accepted_assets": self.ACCEPTED_ASSETS,
             "description": description or "VPN subscription",
             "payload": str(user_id) if user_id else "",
@@ -42,17 +38,19 @@ class CryptoBotAPI:
         }
 
         try:
-            response = requests.get(
-                f"{self.base_url}/createInvoice",
-                params=payload,
-                headers=self._headers(),
-                timeout=15
-            )
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(
+                    f"{self.base_url}/createInvoice",
+                    params=payload,
+                    headers=self._headers()
+                )
             data = response.json()
             if data.get("ok"):
                 inv = data["result"]
-                logger.info(f"CryptoBot: создан FIAT-инвойс {inv.get('invoice_id')} "
-                            f"на {inv.get('amount')} {inv.get('fiat')}")
+                logger.info(
+                    f"CryptoBot: создан FIAT-инвойс {inv.get('invoice_id')} "
+                    f"на {inv.get('amount')} {inv.get('fiat')}"
+                )
                 return {
                     "success": True,
                     "invoice_id": inv["invoice_id"],
@@ -67,15 +65,15 @@ class CryptoBotAPI:
             logger.error(f"CryptoBot exception: {e}")
             return {"success": False, "error": str(e)}
 
-    def get_invoice(self, invoice_id: int) -> dict:
-        """Проверяет статус инвойса."""
+    async def get_invoice(self, invoice_id: int) -> dict:
+        """Проверяет статус инвойса (асинхронно)."""
         try:
-            response = requests.get(
-                f"{self.base_url}/getInvoices",
-                params={"invoice_ids": invoice_id},
-                headers=self._headers(),
-                timeout=10
-            )
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    f"{self.base_url}/getInvoices",
+                    params={"invoice_ids": invoice_id},
+                    headers=self._headers()
+                )
             data = response.json()
             if data.get("ok") and data.get("result", {}).get("invoices"):
                 inv = data["result"]["invoices"][0]

@@ -2,11 +2,8 @@
 Отдельный HTTPS-бэкенд аутентификации для Hysteria2 (auth.type: http).
 Читает ту же sqlite через database.check_hy2_auth -> не дублируем путь БД и секреты.
 Запускается отдельным юнитом hy2auth.service, НЕ зависит от vpnbot.service.
-
-Контракт Hysteria2: POST {addr, auth, tx} -> 200 {ok:true,id} ИЛИ не-200 {ok:false}.
-В userpass-режиме поле auth = "username:password".
-Общий секрет передаётся в пути: /hy2auth/<TOKEN> (у Hysteria2 нет кастомных заголовков).
 """
+import os
 import ssl
 import hmac
 import logging
@@ -31,13 +28,11 @@ def _fail(reason: str = "denied", status: int = 403):
 
 
 async def handle_auth(request: web.Request):
-    # 1) Проверка общего секрета из пути (constant-time)
     token_in_path = request.match_info.get("token", "")
     if not hmac.compare_digest(token_in_path, Config.HY2_AUTH_TOKEN or "__unset__"):
         logger.warning("auth: bad token from %s", request.remote)
         return _fail("bad token", 401)
 
-    # 2) Парсинг тела от Hysteria2
     try:
         body = await request.json()
     except Exception:
@@ -51,7 +46,6 @@ async def handle_auth(request: web.Request):
 
     username, password = auth_str.split(":", 1)
 
-    # 3) Проверка пары + срока по БД
     if check_hy2_auth(username, password):
         logger.info("auth OK user=%s addr=%s", username, addr)
         return _ok(username)
@@ -68,8 +62,10 @@ def main():
     if not Config.HY2_AUTH_TOKEN:
         logger.error("HY2_AUTH_TOKEN не задан в .env!")
         return
+    if not Config.HY2_AUTH_CERTFILE or not os.path.exists(Config.HY2_AUTH_CERTFILE):
+        logger.error("HY2_AUTH_CERTFILE не найден или не задан в .env!")
+        return
 
-    # Гарантируем актуальную схему БД (в т.ч. колонку expires_at) до первой проверки
     init_db()
 
     app = web.Application()

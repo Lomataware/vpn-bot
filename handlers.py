@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from urllib.parse import quote
@@ -7,8 +8,8 @@ from telegram.ext import ContextTypes
 
 from config import Config
 from database import (
-    save_user, get_user_info, get_users_count, get_db_connection,
-    save_payment, update_payment_status, get_payment, get_pending_payments,
+    save_user, get_user_info, set_user_marzban, has_used_trial, mark_trial_used,
+    get_db_connection, save_payment, update_payment_status, get_payment,
     get_hy2_cred, upsert_hy2_cred, hy2_access_valid
 )
 from keyboards import get_main_menu, get_back_button, get_plans, get_payment_methods
@@ -25,6 +26,10 @@ def _row_get(row, key, default=None):
         return row[key]
     except (KeyError, IndexError, TypeError):
         return default
+
+
+def _menu_for_user(user_id: int):
+    return get_main_menu(show_trial=not has_used_trial(user_id))
 
 
 # ===== Hysteria2: конфиги только при валидном доступе =====
@@ -50,10 +55,25 @@ def build_hy2_block(user_id: int) -> str:
     return "\n".join(lines)
 
 
-def _grant_hy2(user_id: int, days: int):
-    """Привязывает Hysteria2-доступ к сроку подписки (если протокол настроен)."""
-    if Config.get_hy2_servers():
-        upsert_hy2_cred(user_id, datetime.now() + timedelta(days=days))
+def _sync_hy2_expire(user_id: int, expire_ts: int):
+    """Синхронизирует срок Hysteria2 с timestamp окончания подписки в Marzban."""
+    if Config.get_hy2_servers() and expire_ts:
+        upsert_hy2_cred(user_id, datetime.fromtimestamp(expire_ts))
+
+
+async def _activate_user_sub(user_id: int, days: int) -> dict:
+    """Создаёт или продлевает подписку пользователя в Marzban и Hysteria2."""
+    info = get_user_info(user_id)
+    existing_mu = _row_get(info, "marzban_username")
+    result = await marzban.create_or_extend_subscription(
+        user_id=user_id,
+        days=days,
+        existing_username=existing_mu
+    )
+    if result["success"]:
+        set_user_marzban(user_id, result["username"])
+        _sync_hy2_expire(user_id, result["expire"])
+    return result
 
 
 # ===== /start =====
@@ -65,10 +85,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Добро пожаловать в VPN-сервис.\n"
         f"Выберите нужное действие:"
     )
-    await update.message.reply_text(text, reply_markup=get_main_menu())
+    await update.message.reply_text(text, reply_markup=_menu_for_user(user.id))
 
 
-# ===== Админ: выдать подписку =====
+# ===== Админ: выдать/продлить подписку =====
 async def issue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not Config.is_admin(update.effective_user.id):
         return
@@ -84,28 +104,28 @@ async def issue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ user_id и days должны быть числами")
         return
 
-    username = f"tg_{user_id}_{int(datetime.now().timestamp())}"
-    result = marzban.create_subscription(username, days)
+    result = await _activate_user_sub(user_id, days)
     if result["success"]:
-        with get_db_connection() as conn:
-            conn.execute("UPDATE users SET marzban_username = ? WHERE id = ?", (username, user_id))
-        _grant_hy2(user_id, days)
+        action_word = "продлена" if result.get("extended") else "активирована"
+        expire_str = datetime.fromtimestamp(result["expire"]).strftime("%d.%m.%Y %H:%M")
         try:
             hy2 = build_hy2_block(user_id)
             msg = (
-                f"✅ <b>Подписка активирована!</b>\n\n"
-                f"📅 Срок: <b>{days} дней</b>\n"
+                f"✅ <b>Подписка {action_word}!</b>\n\n"
+                f"📅 Добавлено: <b>{days} дн.</b> (до <b>{expire_str}</b>)\n"
                 f"🔗 <b>VLESS-ссылка:</b>\n<code>{result['subscription_url']}</code>\n\n"
             )
             if hy2:
                 msg += hy2 + "\n\n"
             msg += "💡 Скопируйте ссылки и вставьте в Hiddify / V2RayNG / Streisand."
             await context.bot.send_message(chat_id=user_id, text=msg, parse_mode=ParseMode.HTML)
-            await update.message.reply_text(f"✅ Подписка выдана {user_id} на {days} дн. ({username})")
+            await update.message.reply_text(
+                f"✅ Подписка {action_word} для {user_id} на {days} дн. ({result['username']})"
+            )
         except Exception as e:
             await update.message.reply_text(
-                f"⚠️ Подписка создана, но не отправлена пользователю: {e}\n"
-                f"Username: {username}\nСсылка: {result['subscription_url']}"
+                f"⚠️ Подписка {action_word}, но не отправлена пользователю: {e}\n"
+                f"Username: {result['username']}\nСсылка: {result['subscription_url']}"
             )
     else:
         await update.message.reply_text(f"❌ Ошибка: {result.get('error')}")
@@ -133,28 +153,27 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = payment['user_id']
-    username = f"tg_{user_id}_{int(datetime.now().timestamp())}"
-    result = marzban.create_subscription(username, 30)
+    result = await _activate_user_sub(user_id, 30)
     if result["success"]:
-        update_payment_status(payment_id, "approved", username)
-        with get_db_connection() as conn:
-            conn.execute("UPDATE users SET marzban_username = ? WHERE id = ?", (username, user_id))
-        _grant_hy2(user_id, 30)
+        if not update_payment_status(payment_id, "approved", result["username"]):
+            await update.message.reply_text("⚠️ Платёж уже был обработан ранее.")
+            return
+        expire_str = datetime.fromtimestamp(result["expire"]).strftime("%d.%m.%Y")
         try:
             hy2 = build_hy2_block(user_id)
             msg = (
                 f"✅ <b>Оплата подтверждена!</b>\n\n"
-                f"📅 Подписка на <b>1 месяц</b> активирована.\n"
+                f"📅 Подписка активна до: <b>{expire_str}</b>\n"
                 f"🔗 <b>VLESS-ссылка:</b>\n<code>{result['subscription_url']}</code>\n\n"
             )
             if hy2:
                 msg += hy2 + "\n\n"
-            msg += "💡 Скопируйте ссылки и вставьте в VPN-клиент."
+            msg += "💡 Если вы уже настраивали подключение ранее, менять ссылку в приложении не нужно."
             await context.bot.send_message(chat_id=user_id, text=msg, parse_mode=ParseMode.HTML)
             await update.message.reply_text(f"✅ Платёж #{payment_id} одобрен, подписка выдана {user_id}")
         except Exception as e:
             await update.message.reply_text(
-                f"⚠️ Подписка создана, но пользователь не уведомлён: {e}\nСсылка: {result['subscription_url']}"
+                f"⚠️ Подписка выдана, но пользователь не уведомлён: {e}\nСсылка: {result['subscription_url']}"
             )
     else:
         await update.message.reply_text(f"❌ Ошибка Marzban: {result.get('error')}")
@@ -181,7 +200,7 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
-# ===== Админ: рассылка =====
+# ===== Админ: рассылка (с защитой от FloodWait) =====
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not Config.is_admin(update.effective_user.id):
         return
@@ -198,6 +217,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(chat_id=row[0], text=message)
             sent += 1
+            await asyncio.sleep(0.05)  # Защита от лимита 30 сообщений/сек в Telegram
         except Exception as e:
             failed += 1
             if "blocked" in str(e).lower() or "deleted" in str(e).lower() or "403" in str(e):
@@ -210,24 +230,63 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== Обработчик кнопок =====
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
     user = update.effective_user
+    save_user(user)
 
     try:
         if data == "main_menu":
-            await query.edit_message_text("Главное меню:", reply_markup=get_main_menu())
+            await query.answer()
+            await query.edit_message_text("Главное меню:", reply_markup=_menu_for_user(user.id))
+
+        elif data == "free_trial":
+            if has_used_trial(user.id):
+                await query.answer("Вы уже использовали пробный период!", show_alert=True)
+                await query.edit_message_text("Главное меню:", reply_markup=_menu_for_user(user.id))
+                return
+
+            await query.answer("Активируем пробный период...")
+            result = await _activate_user_sub(user.id, Config.TRIAL_DAYS)
+            if result["success"]:
+                mark_trial_used(user.id)
+                expire_str = datetime.fromtimestamp(result["expire"]).strftime("%d.%m.%Y %H:%M")
+                hy2 = build_hy2_block(user.id)
+                text = (
+                    f"🎁 <b>Пробный период на {Config.TRIAL_DAYS} дня активирован!</b>\n\n"
+                    f"📅 Действует до: <b>{expire_str}</b>\n"
+                    f"🔗 <b>VLESS-ссылка:</b>\n<code>{result['subscription_url']}</code>\n\n"
+                )
+                if hy2:
+                    text += hy2 + "\n\n"
+                text += (
+                    "💡 Скопируйте ссылку и вставьте в Hiddify / V2RayNG / Streisand.\n"
+                    "При последующей покупке подписки ссылка останется прежней!"
+                )
+                await query.edit_message_text(
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_back_button("main_menu")
+                )
+            else:
+                await query.edit_message_text(
+                    "❌ Не удалось активировать пробный период. Попробуйте позже или напишите в поддержку.",
+                    reply_markup=get_back_button("main_menu")
+                )
 
         elif data == "buy_subscription":
+            await query.answer()
             text = (
                 "💳 <b>Покупка подписки</b>\n\n"
                 "Подписка даёт полноценный VPN-доступ для всех ваших устройств.\n"
-                "Протоколы: VLESS (REALITY) + Hysteria2.\n\nВыберите тариф:"
+                "Протоколы: VLESS (REALITY) + Hysteria2.\n"
+                "Если у вас уже есть подписка или пробный период, срок просто продлится без смены настроек!\n\n"
+                "Выберите тариф:"
             )
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_plans())
 
         elif data == "plan_1":
-            context.user_data['selected_plan'] = {"name": "1 месяц", "price": Config.PRICE_1_MONTH}
+            await query.answer()
+            context.user_data['selected_plan'] = {"name": "1 месяц", "price": Config.PRICE_1_MONTH, "days": 30}
             text = (
                 f"✅ Тариф: <b>1 месяц</b>\n💰 Стоимость: <b>{Config.PRICE_1_MONTH}₽</b>\n\n"
                 f"Выберите способ оплаты:"
@@ -235,7 +294,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_payment_methods())
 
         elif data == "pay_manual":
-            plan = context.user_data.get('selected_plan', {})
+            await query.answer()
+            plan = context.user_data.get('selected_plan', {"name": "1 месяц", "price": Config.PRICE_1_MONTH})
             payment_id = save_payment(user.id, plan.get('name'), plan.get('price'), "card")
             text = (
                 f"💳 <b>Оплата на карту</b>\n\n"
@@ -252,8 +312,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button("main_menu"))
 
         elif data == "pay_crypto":
-            plan = context.user_data.get('selected_plan', {})
-            result = crypto_bot.create_invoice(
+            await query.answer()
+            plan = context.user_data.get('selected_plan', {"name": "1 месяц", "price": Config.PRICE_1_MONTH})
+            result = await crypto_bot.create_invoice(
                 amount=plan.get('price'),
                 description=f"VPN {plan.get('name')}",
                 user_id=user.id
@@ -298,69 +359,54 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not invoice or invoice.get("invoice_id") != invoice_id:
                 await query.answer("Сначала создайте платёж", show_alert=True)
                 return
-            
-            # Проверяем статус платежа в БД для предотвращения повторной выдачи
+
             payment_id = invoice["payment_id"]
             payment_record = get_payment(payment_id)
-            if payment_record and payment_record['status'] == 'paid':
-                # Платёж уже обработан, возвращаем существующую подписку
-                mu = payment_record.get('marzban_username')
-                if mu:
-                    ud = marzban.get_user(mu)
-                    if ud["success"]:
-                        d = ud["data"]
-                        expire = d.get('expire')
-                        expire_str = datetime.fromtimestamp(expire).strftime("%d.%m.%Y") if expire else "бессрочно"
-                        hy2 = build_hy2_block(user.id)
-                        text = (
-                            f"✅ <b>Ваша подписка активна!</b>\n\n"
-                            f"📅 Действует до: <b>{expire_str}</b>\n"
-                            f"🔗 <b>VLESS-ссылка:</b>\n<code>{ud['subscription_url']}</code>\n\n"
-                        )
-                        if hy2:
-                            text += hy2 + "\n\n"
-                        text += "💡 Вставьте в Hiddify / V2RayNG / Streisand."
-                        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button("main_menu"))
-                        return
-                
-            result = crypto_bot.get_invoice(invoice_id)
-            if not result["success"]:
-                await query.answer("Ошибка проверки", show_alert=True)
+            if payment_record and payment_record['status'] in ('paid', 'approved'):
+                await query.answer("Платёж уже обработан!", show_alert=True)
                 return
+
+            result = await crypto_bot.get_invoice(invoice_id)
+            if not result["success"]:
+                await query.answer("Ошибка проверки платежа", show_alert=True)
+                return
+
             status = result["status"]
             if status == "paid":
-                # Повторно проверяем статус в БД после получения статуса от CryptoBot
-                payment_record = get_payment(payment_id)
-                if payment_record and payment_record['status'] == 'paid':
+                if not update_payment_status(payment_id, "paid", f"tg_{user.id}"):
                     await query.answer("Платёж уже обработан. Проверьте 'Мой аккаунт'.", show_alert=True)
                     return
-                
-                username = f"tg_{user.id}_{int(datetime.now().timestamp())}"
-                mr = marzban.create_subscription(username, 30)
+
+                await query.answer("Оплата получена! Активируем подписку...")
+                mr = await _activate_user_sub(user.id, 30)
                 if mr["success"]:
-                    update_payment_status(payment_id, "paid", username)
-                    with get_db_connection() as conn:
-                        conn.execute("UPDATE users SET marzban_username = ? WHERE id = ?", (username, user.id))
-                    _grant_hy2(user.id, 30)
+                    mark_trial_used(user.id)
+                    expire_str = datetime.fromtimestamp(mr["expire"]).strftime("%d.%m.%Y")
                     hy2 = build_hy2_block(user.id)
                     text = (
-                        f"✅ <b>Оплата прошла!</b>\n\n"
+                        f"✅ <b>Оплата прошла успешно!</b>\n\n"
+                        f"📅 Подписка активна до: <b>{expire_str}</b>\n"
                         f"🔗 <b>VLESS-ссылка:</b>\n<code>{mr['subscription_url']}</code>\n\n"
                     )
                     if hy2:
                         text += hy2 + "\n\n"
                     text += "💡 Вставьте в Hiddify / V2RayNG / Streisand."
-                    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button("main_menu"))
+                    await query.edit_message_text(
+                        text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=get_back_button("main_menu")
+                    )
                 else:
                     await query.edit_message_text(f"❌ Ошибка выдачи подписки: {mr.get('error')}")
             elif status == "active":
-                await query.answer("Оплата ещё не получена. Попробуйте через минуту.", show_alert=True)
+                await query.answer("Оплата ещё не поступила. Попробуйте через минуту.", show_alert=True)
             elif status == "expired":
                 await query.answer("Инвойс истёк. Создайте платёж заново.", show_alert=True)
             else:
                 await query.answer(f"Статус: {status}", show_alert=True)
 
         elif data == "my_account":
+            await query.answer()
             info = get_user_info(user.id)
             created = _row_get(info, 'created_at', 'Неизвестно')
             mu = _row_get(info, 'marzban_username')
@@ -373,9 +419,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📅 С нами с: {str(created)[:10]}\n\n"
             )
             keyboard_rows = []
-            sub_active = False
             if mu:
-                ud = marzban.get_user(mu)
+                ud = await marzban.get_user(mu)
                 if ud["success"]:
                     d = ud["data"]
                     status = d.get('status', 'unknown')
@@ -385,9 +430,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text += f"{status_emoji} <b>Подписка:</b> {status} (до {expire_str})\n"
                     sub_active = (status == "active")
 
-                    # Ленивая миграция Hysteria2 для старых пользователей:
-                    # если подписка активна, а hy2-доступ ещё не заведён/неактуален —
-                    # синхронизируем срок из Marzban один раз.
                     if sub_active and Config.get_hy2_servers():
                         hy_row = get_hy2_cred(user.id)
                         need_sync = (not hy_row) or (not hy_row["active"]) or (not hy_row["expires_at"])
@@ -401,9 +443,8 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     text += "📌 <b>Подписка:</b> данные недоступны\n"
             else:
-                text += "📌 <b>Подписка:</b> нет активной\n\nКупите подписку в меню 💳"
+                text += "📌 <b>Подписка:</b> нет активной\n\nАктивируйте пробный период или купите подписку в меню 💳"
 
-            # Hysteria2 — кнопка только при валидном доступе
             if Config.get_hy2_servers() and hy2_access_valid(user.id):
                 keyboard_rows.append([InlineKeyboardButton("🌀 Hysteria2-конфиг", callback_data="hy2_configs")])
 
@@ -416,10 +457,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not mu:
                 await query.answer("У вас нет активной подписки", show_alert=True)
                 return
-            ud = marzban.get_user(mu)
+            ud = await marzban.get_user(mu)
             if not ud["success"]:
                 await query.answer("Не удалось получить данные", show_alert=True)
                 return
+            await query.answer()
             d = ud["data"]
             expire = d.get('expire')
             expire_str = datetime.fromtimestamp(expire).strftime("%d.%m.%Y %H:%M") if expire else "бессрочно"
@@ -442,10 +484,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not mu:
                 await query.answer("У вас нет активной подписки", show_alert=True)
                 return
-            ud = marzban.get_user(mu)
-            if ud["success"] and ud["data"].get("subscription_url"):
-                sub = ud["data"]["subscription_url"]
-                full_url = f"{Config.MARZBAN_URL.rstrip('/')}{sub}" if sub.startswith('/') else sub
+            ud = await marzban.get_user(mu)
+            if ud["success"] and ud.get("subscription_url"):
+                await query.answer()
+                full_url = ud["subscription_url"]
                 text = (
                     f"🔗 <b>VLESS-конфиг</b>\n\n"
                     f"<code>{full_url}</code>\n\n"
@@ -463,6 +505,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not block:
                 await query.answer("Hysteria2 пока не настроен", show_alert=True)
                 return
+            await query.answer()
             text = (
                 "🌀 <b>Ваши Hysteria2 конфиги</b>\n\n"
                 "Персональные — у каждого свой ключ, можно отозвать отдельно.\n\n"
@@ -475,6 +518,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
         elif data == "terms":
+            await query.answer()
             text = (
                 "📋 <b>Пользовательское соглашение</b>\n\n"
                 "1. Сервис предоставляется «как есть» без гарантий.\n"
@@ -487,11 +531,12 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_back_button())
 
         elif data == "help":
+            await query.answer()
             text = (
                 "❓ <b>Помощь</b>\n\n"
                 f"📞 <b>Поддержка:</b> @{Config.SUPPORT_USERNAME}\n\n"
                 "<b>Как подключиться:</b>\n"
-                "1. Купите подписку или получите у админа\n"
+                "1. Активируйте пробный период (3 дня) или купите подписку\n"
                 "2. Скопируйте ссылки (VLESS и/или Hysteria2)\n"
                 "3. Вставьте в приложение:\n"
                 "   • Hiddify (все платформы) — рекомендуется\n"
@@ -516,9 +561,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user(update.effective_user)
+    user = update.effective_user
     text = update.message.text.lower()
     if "привет" in text or "hi" in text:
-        await update.message.reply_text("Привет! 👋", reply_markup=get_main_menu())
+        await update.message.reply_text("Привет! 👋", reply_markup=_menu_for_user(user.id))
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -527,12 +573,14 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_db_connection() as conn:
         total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         active = conn.execute("SELECT COUNT(*) FROM users WHERE date(last_active) = date('now')").fetchone()[0]
+        trials = conn.execute("SELECT COUNT(*) FROM users WHERE trial_used = TRUE").fetchone()[0]
         pend = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'pending'").fetchone()[0]
         paid = conn.execute("SELECT COUNT(*) FROM payments WHERE status IN ('approved','paid')").fetchone()[0]
     text = (
         f"📊 <b>Статистика</b>\n\n"
         f"👥 Всего пользователей: {total}\n"
-        f"🟢 Активных сегодня: {active}\n\n"
+        f"🟢 Активных сегодня: {active}\n"
+        f"🎁 Взяли триал: {trials}\n\n"
         f"💳 Платежей в ожидании: {pend}\n"
         f"✅ Оплачено: {paid}"
     )

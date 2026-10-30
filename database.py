@@ -1,4 +1,5 @@
 import os
+import shutil
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -10,7 +11,7 @@ DB_PATH = 'vpn_bot.db'
 
 
 def check_db_integrity():
-    """Проверяет целостность БД и удаляет её, если повреждена"""
+    """Проверяет целостность БД без удаления рабочих данных при сбое."""
     if not os.path.exists(DB_PATH):
         return
     try:
@@ -19,34 +20,27 @@ def check_db_integrity():
         cursor.execute("PRAGMA integrity_check")
         result = cursor.fetchone()
         conn.close()
-        if result[0] != "ok":
-            logger.warning(f"БД повреждена: {result[0]}, пересоздаю...")
-            os.remove(DB_PATH)
+        if not result or result[0] != "ok":
+            backup_path = f"{DB_PATH}.corrupt.{int(datetime.now().timestamp())}"
+            logger.critical(f"Обнаружено повреждение БД ({result})! Сохраняю резервную копию в {backup_path}")
+            shutil.copy2(DB_PATH, backup_path)
     except Exception as e:
-        logger.error(f"Ошибка проверки БД: {e}")
-        try:
-            os.remove(DB_PATH)
-        except:
-            pass
+        logger.error(f"Ошибка проверки целостности БД: {e}")
 
 
 @contextmanager
 def get_db_connection():
     """Контекстный менеджер для безопасной работы с БД"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=10000")
         yield conn
         conn.commit()
     except sqlite3.DatabaseError as e:
         conn.rollback()
         logger.error(f"Ошибка БД: {e}")
-        if "malformed" in str(e).lower():
-            try:
-                os.remove(DB_PATH)
-            except:
-                pass
         raise
     finally:
         conn.close()
@@ -65,13 +59,13 @@ def init_db():
                 first_name TEXT,
                 last_name TEXT,
                 is_blocked BOOLEAN DEFAULT FALSE,
+                trial_used BOOLEAN DEFAULT FALSE,
                 marzban_username TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
 
-        # Hysteria2-учётки с привязкой к сроку подписки
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS hy2_credentials (
                 user_id    INTEGER PRIMARY KEY,
@@ -102,6 +96,7 @@ def init_db():
         # Миграции для уже существующих таблиц
         for stmt in (
             "ALTER TABLE users ADD COLUMN is_blocked BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE users ADD COLUMN trial_used BOOLEAN DEFAULT FALSE",
             "ALTER TABLE users ADD COLUMN marzban_username TEXT",
             "ALTER TABLE users ADD COLUMN last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
             "ALTER TABLE hy2_credentials ADD COLUMN expires_at TEXT",
@@ -124,14 +119,37 @@ def save_user(user):
                 last_name=excluded.last_name,
                 last_active=excluded.last_active
         ''', (user.id, user.username or "", user.first_name or "",
-              user.last_name or "", datetime.now()))
+              user.last_name or "", datetime.now().isoformat()))
 
 
-def get_user_info(user_id):
+def get_user_info(user_id: int):
     with get_db_connection() as conn:
         return conn.execute(
             "SELECT * FROM users WHERE id = ?", (user_id,)
         ).fetchone()
+
+
+def set_user_marzban(user_id: int, marzban_username: str):
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE users SET marzban_username = ? WHERE id = ?",
+            (marzban_username, user_id)
+        )
+
+
+def has_used_trial(user_id: int) -> bool:
+    row = get_user_info(user_id)
+    if not row:
+        return False
+    return bool(row["trial_used"]) or bool(row["marzban_username"])
+
+
+def mark_trial_used(user_id: int):
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE users SET trial_used = TRUE WHERE id = ?",
+            (user_id,)
+        )
 
 
 def get_users_count():
@@ -153,19 +171,23 @@ def save_payment(user_id: int, plan: str, amount: int, method: str,
 
 
 def update_payment_status(payment_id: int, status: str,
-                          marzban_username: str = None):
+                          marzban_username: str = None) -> bool:
+    """Атомарно обновляет статус платежа только если он ещё в 'pending'.
+    Возвращает True, если статус был успешно изменён."""
     with get_db_connection() as conn:
+        cursor = conn.cursor()
         if marzban_username:
-            conn.execute('''
+            cursor.execute('''
                 UPDATE payments 
                 SET status = ?, marzban_username = ?, paid_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = ? AND status = 'pending'
             ''', (status, marzban_username, payment_id))
         else:
-            conn.execute(
-                "UPDATE payments SET status = ? WHERE id = ?",
+            cursor.execute(
+                "UPDATE payments SET status = ? WHERE id = ? AND status = 'pending'",
                 (status, payment_id)
             )
+        return cursor.rowcount > 0
 
 
 def get_pending_payments(user_id: int) -> list:
@@ -211,36 +233,29 @@ def hy2_access_valid(user_id: int) -> bool:
 
 
 def upsert_hy2_cred(user_id: int, expires_at: datetime):
-    """Создаёт или ПРОДЛЕВАЕТ Hysteria2-доступ до expires_at.
-    Вызывается ТОЛЬКО при выдаче/продлении подписки — не по нажатию кнопки.
-    Использует IMMEDIATE транзакцию для предотвращения race condition.
-    SQLite не поддерживает FOR UPDATE, поэтому используем BEGIN IMMEDIATE + INSERT OR REPLACE."""
+    """Создаёт или ПРОДЛЕВАЕТ Hysteria2-доступ до expires_at."""
     exp_iso = expires_at.isoformat()
-    
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        # BEGIN IMMEDIATE блокирует БД от записи другими подключениями до коммита
         cursor.execute("BEGIN IMMEDIATE")
-        
+
         try:
-            # Проверяем существующую запись
             cursor.execute(
                 "SELECT user_id, username, password, active, expires_at "
                 "FROM hy2_credentials WHERE user_id = ?",
                 (user_id,)
             )
             row = cursor.fetchone()
-            
+
             if row:
-                # Обновляем существующую запись (пароль не меняем, только срок)
                 cursor.execute(
                     "UPDATE hy2_credentials SET active = 1, expires_at = ? WHERE user_id = ?",
                     (exp_iso, user_id)
                 )
                 conn.commit()
                 return row["username"], row["password"]
-            
-            # Создаём новую запись
+
             username = f"tg{user_id}"
             password = secrets.token_urlsafe(16)
             cursor.execute(
@@ -266,10 +281,7 @@ def set_hy2_active(user_id: int, active: bool):
 
 
 def check_hy2_auth(username: str, password: str) -> bool:
-    """Auth-сервер: пускаем, только если пара верна, активна И срок не истёк.
-    Сравнивает оригинальный пароль с сохранённым в БД.
-    ПРИМЕЧАНИЕ: В текущей реализации пароль хранится в открытом виде для совместимости с URI.
-    Для повышения безопасности рекомендуется добавить отдельное поле password_hash."""
+    """Auth-сервер: пускаем, только если пара верна, активна И срок не истёк."""
     with get_db_connection() as conn:
         row = conn.execute(
             "SELECT active, expires_at FROM hy2_credentials "

@@ -2,13 +2,21 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from config import Config
 
 
-def get_main_menu():
-    buttons = [
+def get_main_menu(show_trial: bool = False):
+    buttons = []
+    if show_trial:
+        buttons.append([
+            InlineKeyboardButton(
+                f"🎁 Пробный период ({Config.TRIAL_DAYS} дня)",
+                callback_data="free_trial"
+            )
+        ])
+    buttons.extend([
         [InlineKeyboardButton("💳 Купить подписку", callback_data="buy_subscription")],
         [InlineKeyboardButton("👤 Мой аккаунт", callback_data="my_account")],
         [InlineKeyboardButton("📄 Пользовательское соглашение", callback_data="terms")],
         [InlineKeyboardButton("❓ Помощь", callback_data="help")],
-    ]
+    ])
     return InlineKeyboardMarkup(buttons)
 
 

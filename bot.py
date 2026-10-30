@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -44,13 +43,7 @@ def main():
     app.add_error_handler(error_handler)
 
     logger.info("🚀 Бот запущен!")
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        app.run_polling(drop_pending_updates=True)
-    finally:
-        loop.close()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":

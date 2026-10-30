@@ -9,7 +9,7 @@ class Config:
     BOT_TOKEN = os.getenv('BOT_TOKEN')
     ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 
-    # ===== SUPPORT (все личные данные в .env!) =====
+    # ===== SUPPORT =====
     SUPPORT_USERNAME = os.getenv('SUPPORT_USERNAME', 'support')
     SUPPORT_PHONE = os.getenv('SUPPORT_PHONE', '')
     BANK_NAME = os.getenv('BANK_NAME', 'Банк')
@@ -27,7 +27,8 @@ class Config:
     CRYPTOBOT_ENABLED = os.getenv('CRYPTOBOT_ENABLED', 'false').lower() == 'true'
     CRYPTOBOT_TESTNET = os.getenv('CRYPTOBOT_TESTNET', 'true').lower() == 'true'
 
-    # ===== PRICES =====
+    # ===== TRIAL & PRICES =====
+    TRIAL_DAYS = int(os.getenv('TRIAL_DAYS', '3'))
     PRICE_1_MONTH = int(os.getenv('PRICE_1_MONTH', '100'))
 
     # ===== ADMIN COMMANDS =====
@@ -45,8 +46,8 @@ class Config:
     HY2_AUTH_TOKEN = os.getenv("HY2_AUTH_TOKEN", "")
     HY2_AUTH_HOST = os.getenv("HY2_AUTH_HOST", "0.0.0.0")
     HY2_AUTH_PORT = int(os.getenv("HY2_AUTH_PORT", "9443"))
-    HY2_AUTH_CERTFILE = os.getenv("HY2_AUTH_CERTFILE", "/etc/letsencrypt/live/de.shqq.ru/fullchain.pem")
-    HY2_AUTH_KEYFILE = os.getenv("HY2_AUTH_KEYFILE", "/etc/letsencrypt/live/de.shqq.ru/privkey.pem")
+    HY2_AUTH_CERTFILE = os.getenv("HY2_AUTH_CERTFILE", "")
+    HY2_AUTH_KEYFILE = os.getenv("HY2_AUTH_KEYFILE", "")
     _HY2_SERVERS_RAW = os.getenv("HY2_SERVERS", "")
 
     @classmethod
