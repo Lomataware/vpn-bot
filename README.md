@@ -68,7 +68,7 @@
 Скачайте и запустите скрипт `install_vpn.sh` — он сам запросит нужные параметры:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ВАШ_НИК/vpn-bot/main/install_vpn.sh -o install_vpn.sh
+curl -fsSL https://raw.githubusercontent.com/Lomataware/vpn-bot/main/install_vpn.sh -o install_vpn.sh
 bash install_vpn.sh
 ```
 
