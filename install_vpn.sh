@@ -124,7 +124,7 @@ set_env_var "UVICORN_PORT" "8000" "$MARZBAN_ENV"
 set_env_var "SUDO_USERNAME" "$MARZBAN_ADMIN_USER" "$MARZBAN_ENV"
 set_env_var "SUDO_PASSWORD" "$MARZBAN_ADMIN_PASS" "$MARZBAN_ENV"
 
-marzban restart || true
+cd /opt/marzban && docker compose down && docker compose up -d
 sleep 5
 marzban cli admin import-from-env -y >/dev/null 2>&1 \
   || warn "Не удалось импортировать админа из env. Проверьте: marzban cli admin create --sudo"
@@ -230,7 +230,7 @@ cat > "$XRAY_JSON" <<EOF
   }
 }
 EOF
-marzban restart
+cd /opt/marzban && docker compose down && docker compose up -d
 
 # Ждём поднятия API Marzban и прописываем Host для генерации vless:// ссылок
 log "Регистрация Host (${DOMAIN}:443) в Marzban API"
