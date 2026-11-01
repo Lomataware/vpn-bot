@@ -48,7 +48,8 @@ ask TRIAL_DAYS        "Пробный период, дней" "3"
 BOT_DIR="/root/vpn_bot/vpntg"
 CRED_FILE="/root/install_credentials.txt"
 MARZBAN_ADMIN_USER="admin"
-MARZBAN_ADMIN_PASS="$(openssl rand -hex 12)"
+EXISTING_MARZBAN_PASS="$(sed -n 's/^SUDO_PASSWORD=//p' /opt/marzban/.env 2>/dev/null | head -n1 | tr -d '\"\x27\r ' || true)"
+MARZBAN_ADMIN_PASS="${EXISTING_MARZBAN_PASS:-$(openssl rand -hex 12)}"
 HY2_AUTH_TOKEN="$(openssl rand -hex 24)"
 REALITY_SHORT_ID="$(openssl rand -hex 8)"
 REALITY_DEST="www.microsoft.com"
@@ -103,7 +104,7 @@ chmod +x /etc/letsencrypt/renewal-hooks/deploy/restart-vpn.sh
 # ---------- 6. Marzban --------------------------------------------------------
 log "Установка Marzban (официальный скрипт)"
 if ! command -v marzban >/dev/null 2>&1; then
-  bash -c "$(curl -sL https://github.com/Gozargah/Marzban-scripts/raw/master/marzban.sh)" @ install
+  bash -c "$(curl -sL https://github.com/Gozargah/Marzban-scripts/raw/master/marzban.sh | sed 's/logs_command/true/g; s/follow_marzban_logs/true/g')" @ install
 fi
 
 MARZBAN_ENV="/opt/marzban/.env"
@@ -131,14 +132,17 @@ marzban cli admin import-from-env -y >/dev/null 2>&1 \
 
 # ---------- 7. Xray: VLESS + Reality inbound (со статистикой!) ---------------
 log "Настройка Xray (VLESS + Reality + Stats + Anti-Torrent)"
+MARZBAN_CONTAINER=""
 for _ in $(seq 1 30); do
-  docker ps --format '{{.Names}}' | grep -qx marzban && break
+  MARZBAN_CONTAINER="$(docker ps --format '{{.Names}}' | grep -E '^marzban(-marzban-1)?$' | head -n1 || true)"
+  [[ -n "$MARZBAN_CONTAINER" ]] && break
   sleep 2
 done
+[[ -n "$MARZBAN_CONTAINER" ]] || die "Контейнер Marzban не запустился"
 
-REALITY_KEYS="$(docker exec marzban xray x25519)"
-REALITY_PRIV="$(echo "$REALITY_KEYS" | grep -i 'private' | awk '{print $NF}')"
-REALITY_PUB="$(echo "$REALITY_KEYS" | grep -i 'public' | awk '{print $NF}')"
+REALITY_KEYS="$(docker exec "$MARZBAN_CONTAINER" xray x25519)"
+REALITY_PRIV="$(echo "$REALITY_KEYS" | grep -i 'private' | awk '{print $NF}' | tr -d '\r')"
+REALITY_PUB="$(echo "$REALITY_KEYS" | grep -iE 'public|password' | head -n1 | awk '{print $NF}' | tr -d '\r')"
 [[ -n "$REALITY_PRIV" ]] || die "Не удалось сгенерировать ключ Reality"
 
 XRAY_JSON="/var/lib/marzban/xray_config.json"
@@ -501,7 +505,7 @@ HEALTH="$(curl -sk "https://127.0.0.1:9443/health" || true)"
 [[ "$HEALTH" == *'"ok"'* ]] && echo "hy2auth: OK" || warn "hy2auth не отвечает: journalctl -u hy2auth"
 systemctl is-active --quiet hysteria && echo "hysteria: OK"  || warn "hysteria не запущен: journalctl -u hysteria"
 systemctl is-active --quiet vpnbot   && echo "vpnbot: OK"    || warn "vpnbot не запущен: journalctl -u vpnbot"
-docker ps --format '{{.Names}}' | grep -qx marzban && echo "marzban: OK" || warn "marzban не запущен: marzban logs"
+docker ps --format '{{.Names}}' | grep -q '^marzban' && echo "marzban: OK" || warn "marzban не запущен: marzban logs"
 
 # ---------- 13. Итог ----------------------------------------------------------
 cat > "$CRED_FILE" <<EOF
